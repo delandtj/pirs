@@ -101,8 +101,11 @@ async fn run_request(
         options,
         max_retries,
     } = job;
-    let mut attempt = 0u32;
-    let response = loop {
+    let mut stream_attempt = 0u32;
+    let outcome = 'retry: loop {
+        let response = {
+            let mut attempt = 0u32;
+            let response = loop {
         let mut req = client.post(&url).json(&body);
         let has_auth_override = options
             .extra_headers
@@ -161,9 +164,37 @@ async fn run_request(
                 return;
             }
         }
+            };
+            response
+        };
+
+        let outcome = stream_response(response, &provider, &model, &cancel, &tx).await;
+        let empty = outcome.message.content.is_empty()
+            || outcome.message.content.iter().all(|b| match b {
+                ContentBlock::Text { text, .. } => text.trim().is_empty(),
+                ContentBlock::Thinking { thinking, .. } => thinking.trim().is_empty(),
+                _ => false,
+            });
+        let retryable = matches!(outcome.message.stop_reason, StopReason::Error)
+            || (empty && matches!(outcome.message.stop_reason, StopReason::Stop));
+        if retryable && !outcome.deltas_sent && stream_attempt < max_retries && !cancel.is_cancelled() {
+            stream_attempt += 1;
+            tracing::warn!(
+                "retrying completion (attempt {stream_attempt}/{max_retries}): {}",
+                outcome.message.error_message.as_deref().unwrap_or("empty completion")
+            );
+            backoff(stream_attempt, None, &cancel).await;
+            continue 'retry;
+        }
+        break outcome;
     };
 
-    stream_response(response, provider, model, cancel, tx).await;
+    let _ = tx.send(StreamEvent::Done(Box::new(outcome.message))).await;
+}
+
+struct StreamOutcome {
+    message: AssistantMessage,
+    deltas_sent: bool,
 }
 
 async fn backoff(attempt: u32, retry_after: Option<u64>, cancel: &tokio_util::sync::CancellationToken) {
@@ -207,20 +238,23 @@ fn extract_error_body(body: &str) -> String {
 
 async fn stream_response(
     response: reqwest::Response,
-    provider: String,
-    model: String,
-    cancel: tokio_util::sync::CancellationToken,
-    tx: tokio::sync::mpsc::Sender<StreamEvent>,
-) {
+    provider: &str,
+    model: &str,
+    cancel: &tokio_util::sync::CancellationToken,
+    tx: &tokio::sync::mpsc::Sender<StreamEvent>,
+) -> StreamOutcome {
     let mut sse = SseStream::new(response);
     let mut acc = Accumulator::default();
+    let mut deltas_sent = false;
     let _ = tx.send(StreamEvent::Start).await;
 
     loop {
         let item = tokio::select! {
             _ = cancel.cancelled() => {
-                send_done(&tx, &provider, &model, StopReason::Aborted, None).await;
-                return;
+                return StreamOutcome {
+                    message: aborted_message(provider, model),
+                    deltas_sent,
+                };
             }
             i = sse.next() => i,
         };
@@ -229,8 +263,10 @@ async fn stream_response(
             Some(Ok(d)) => d,
             Some(Err(e)) => {
                 let _ = tx.send(StreamEvent::Error(e.to_string())).await;
-                send_done(&tx, &provider, &model, StopReason::Error, Some(e.to_string())).await;
-                return;
+                return StreamOutcome {
+                    message: error_message(provider, model, e.to_string()),
+                    deltas_sent,
+                };
             }
         };
         if data == "[DONE]" {
@@ -243,10 +279,18 @@ async fn stream_response(
         if let Some(err) = chunk.get("error") {
             let msg = extract_error_body(&err.to_string());
             let _ = tx.send(StreamEvent::Error(msg.clone())).await;
-            send_done(&tx, &provider, &model, StopReason::Error, Some(msg)).await;
-            return;
+            return StreamOutcome {
+                message: error_message(provider, model, msg),
+                deltas_sent,
+            };
         }
         for ev in acc.apply_chunk(&chunk) {
+            if matches!(
+                ev,
+                StreamEvent::TextDelta(_) | StreamEvent::ThinkingDelta(_) | StreamEvent::ToolCallDelta
+            ) {
+                deltas_sent = true;
+            }
             let _ = tx.send(ev).await;
         }
     }
@@ -254,12 +298,37 @@ async fn stream_response(
     if acc.finish_reason.is_none() {
         let msg = "Stream ended without finish_reason".to_string();
         let _ = tx.send(StreamEvent::Error(msg.clone())).await;
-        send_done(&tx, &provider, &model, StopReason::Error, Some(msg)).await;
-        return;
+        return StreamOutcome {
+            message: error_message(provider, model, msg),
+            deltas_sent,
+        };
     }
 
-    let msg = acc.into_message(&provider, &model);
-    let _ = tx.send(StreamEvent::Done(Box::new(msg))).await;
+    StreamOutcome {
+        message: acc.into_message(provider, model),
+        deltas_sent,
+    }
+}
+
+fn aborted_message(provider: &str, model: &str) -> AssistantMessage {
+    AssistantMessage {
+        provider: provider.to_string(),
+        api: "openai-completions".to_string(),
+        model: model.to_string(),
+        stop_reason: StopReason::Aborted,
+        ..Default::default()
+    }
+}
+
+fn error_message(provider: &str, model: &str, error: String) -> AssistantMessage {
+    AssistantMessage {
+        provider: provider.to_string(),
+        api: "openai-completions".to_string(),
+        model: model.to_string(),
+        stop_reason: StopReason::Error,
+        error_message: Some(error),
+        ..Default::default()
+    }
 }
 
 #[derive(Default)]
