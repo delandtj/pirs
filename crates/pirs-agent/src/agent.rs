@@ -35,6 +35,7 @@ pub struct Agent {
     tool_execution: ExecutionMode,
     pub compaction: Option<CompactionConfig>,
     visible_tools: Option<VisibleTools>,
+    extra_usage: Arc<Mutex<pirs_ai::Usage>>,
     hooks: Hooks,
     listeners: Vec<Emit>,
     steering: Arc<Mutex<VecDeque<Message>>>,
@@ -57,6 +58,7 @@ impl Agent {
             tool_execution: ExecutionMode::Parallel,
             compaction: Some(CompactionConfig::default()),
             visible_tools: None,
+            extra_usage: Arc::new(Mutex::new(pirs_ai::Usage::default())),
             hooks: Hooks::default(),
             listeners: Vec::new(),
             steering: Arc::new(Mutex::new(VecDeque::new())),
@@ -102,6 +104,15 @@ impl Agent {
         self.compaction.is_some()
     }
 
+    pub fn usage_report(&self) -> crate::usage::UsageReport {
+        let extra = self.extra_usage.lock().unwrap().clone();
+        crate::usage::usage_report(&self.messages, extra)
+    }
+
+    pub fn extra_usage_handle(&self) -> Arc<Mutex<pirs_ai::Usage>> {
+        Arc::clone(&self.extra_usage)
+    }
+
     pub async fn compact_now(&mut self) -> bool {
         let Some(cfg) = self.compaction.clone() else {
             return false;
@@ -120,6 +131,7 @@ impl Agent {
             &cfg,
             &emit,
             self.cancel.clone(),
+            &self.extra_usage,
         )
         .await
     }
@@ -255,6 +267,7 @@ impl Agent {
             hooks,
             compaction: self.compaction.clone(),
             visible_tools: self.visible_tools.clone(),
+            extra_usage: Arc::clone(&self.extra_usage),
         };
 
         let tools = self.tools.clone();

@@ -106,17 +106,17 @@ impl AgentTool for DelegateTool {
             .iter()
             .filter(|m| matches!(m, Message::ToolResult(_)))
             .count();
-        let tokens: u64 = new_messages
-            .iter()
-            .filter_map(|m| match m {
-                Message::Assistant(a) => Some(a.usage.total_tokens),
-                _ => None,
-            })
-            .sum();
+        let mut sub_usage = pirs_ai::Usage::default();
+        for m in &new_messages {
+            if let Message::Assistant(a) = m {
+                sub_usage += a.usage.clone();
+            }
+        }
 
         Ok(ToolOutput::text(answer).with_details(json!({
             "subAgentToolCalls": tool_calls,
-            "subAgentTokens": tokens,
+            "subAgentModel": model,
+            "subAgentUsage": sub_usage,
         })))
     }
 }

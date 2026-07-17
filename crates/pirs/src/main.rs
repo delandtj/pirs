@@ -129,6 +129,26 @@ impl Default for Printer {
     }
 }
 
+fn print_usage(report: &pirs_agent::usage::UsageReport) {
+    let total = report.grand_total();
+    eprintln!(
+        "[usage: {} api calls + {} delegate sub-agents | input {} (cached {}) | output {} | reasoning {} | total {}]",
+        report.calls.len() - report.delegate_calls(),
+        report.delegate_calls(),
+        total.input,
+        total.cache_read,
+        total.output,
+        total.reasoning,
+        total.total_tokens,
+    );
+    for (model, u) in &report.by_model {
+        eprintln!(
+            "  {model}: input {} (cached {}) output {} total {}",
+            u.input, u.cache_read, u.output, u.total_tokens
+        );
+    }
+}
+
 fn summarize_args(tool: &str, args: &serde_json::Value) -> String {
     let key = match tool {
         "bash" => "command",
@@ -318,6 +338,8 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(prompt) = cli.prompt.take() {
         run_turn(&mut agent, &prompt, &printer, &session_path).await?;
+        eprintln!();
+        print_usage(&agent.usage_report());
         return Ok(());
     }
 
@@ -478,6 +500,9 @@ async fn handle_command(line: &str, agent: &mut Agent, session_path: &Path) -> a
                 agent.model = arg.to_string();
                 println!("model set to {arg}");
             }
+        }
+        "/usage" => {
+            print_usage(&agent.usage_report());
         }
         "/compact" => {
             println!("compacting...");

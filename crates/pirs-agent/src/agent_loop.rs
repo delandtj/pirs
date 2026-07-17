@@ -20,6 +20,7 @@ pub struct LoopConfig {
     pub hooks: Hooks,
     pub compaction: Option<CompactionConfig>,
     pub visible_tools: Option<VisibleTools>,
+    pub extra_usage: std::sync::Arc<std::sync::Mutex<pirs_ai::Usage>>,
 }
 
 pub type VisibleTools = std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
@@ -162,6 +163,7 @@ pub async fn run_agent_loop(
                         cfg,
                         emit,
                         cancel.clone(),
+                        &config.extra_usage,
                     )
                     .await;
                 }

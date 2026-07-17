@@ -137,7 +137,7 @@ pub async fn summarize(
     model: &str,
     messages: &[Message],
     cancel: CancellationToken,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, pirs_ai::Usage)> {
     let mut transcript = transcript_text(messages);
     if transcript.len() > MAX_SUMMARY_INPUT_CHARS {
         let keep = transcript.len() - MAX_SUMMARY_INPUT_CHARS;
@@ -164,6 +164,7 @@ pub async fn summarize(
     let mut text = String::new();
     let mut stop = StopReason::Stop;
     let mut error = None;
+    let mut usage = pirs_ai::Usage::default();
     use futures::StreamExt;
     while let Some(ev) = stream.next().await {
         match ev {
@@ -171,6 +172,7 @@ pub async fn summarize(
             StreamEvent::Done(msg) => {
                 stop = msg.stop_reason;
                 error = msg.error_message.clone();
+                usage = msg.usage.clone();
                 if text.is_empty() {
                     text = msg.text();
                 }
@@ -179,7 +181,7 @@ pub async fn summarize(
         }
     }
     match stop {
-        StopReason::Stop | StopReason::ToolUse if !text.trim().is_empty() => Ok(text),
+        StopReason::Stop | StopReason::ToolUse if !text.trim().is_empty() => Ok((text, usage)),
         StopReason::Aborted => anyhow::bail!("summarization aborted"),
         _ => anyhow::bail!(
             "summarization failed: {}",
@@ -197,6 +199,7 @@ pub async fn compact_messages(
     config: &CompactionConfig,
     emit: &crate::events::Emit,
     cancel: CancellationToken,
+    extra_usage: &std::sync::Arc<std::sync::Mutex<pirs_ai::Usage>>,
 ) -> bool {
     let Some(cut) = find_cut_point(messages, config.keep_recent_tokens) else {
         return false;
@@ -206,7 +209,8 @@ pub async fn compact_messages(
     });
     let result = summarize(provider, model, &messages[..cut], cancel).await;
     match result {
-        Ok(summary) => {
+        Ok((summary, usage)) => {
+            *extra_usage.lock().unwrap() += usage;
             let summary_msg = Message::user(format!("{SUMMARY_PREFIX}\n{summary}\n{SUMMARY_SUFFIX}"));
             messages.splice(..cut, [summary_msg]);
             emit(AgentEvent::CompactionEnd {

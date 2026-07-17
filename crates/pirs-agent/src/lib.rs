@@ -4,6 +4,7 @@ pub mod agent_loop;
 pub mod events;
 pub mod delegate;
 pub mod tool;
+pub mod usage;
 pub mod use_tool;
 pub mod validate;
 

@@ -315,22 +315,23 @@ async fn handle_command(
             respond(true, Some(json!({ "text": text })), None);
         }
         "get_session_stats" => {
-            let tokens: u64 = actor
-                .agent
-                .messages
+            let report = actor.agent.usage_report();
+            let total = report.grand_total();
+            let by_model: serde_json::Map<String, Value> = report
+                .by_model
                 .iter()
-                .filter_map(|m| match m {
-                    Message::Assistant(a) => Some(a.usage.total_tokens),
-                    _ => None,
-                })
-                .sum();
+                .map(|(m, u)| (m.clone(), serde_json::to_value(u).unwrap_or(Value::Null)))
+                .collect();
             respond(
                 true,
                 Some(json!({
                     "sessionFile": actor.session_path.to_string_lossy(),
                     "sessionId": actor.session_id,
                     "messageCount": actor.agent.messages.len(),
-                    "totalTokens": tokens,
+                    "apiCalls": report.calls.len() - report.delegate_calls(),
+                    "delegateCalls": report.delegate_calls(),
+                    "usage": serde_json::to_value(&total).unwrap_or(Value::Null),
+                    "usageByModel": Value::Object(by_model),
                 })),
                 None,
             );

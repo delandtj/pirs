@@ -28,6 +28,25 @@ pub struct Usage {
     pub reasoning: u64,
 }
 
+impl std::ops::AddAssign for Usage {
+    fn add_assign(&mut self, other: Usage) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.total_tokens += other.total_tokens;
+        self.reasoning += other.reasoning;
+    }
+}
+
+impl std::ops::Add for Usage {
+    type Output = Usage;
+    fn add(mut self, other: Usage) -> Usage {
+        self += other;
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ContentBlock {
