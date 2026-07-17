@@ -291,6 +291,26 @@ fn error_result(id: &str, name: &str, message: &str) -> ToolResultMessage {
     }
 }
 
+fn schema_summary(schema: &Value) -> String {
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return "(any object)".to_string();
+    };
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    props
+        .iter()
+        .map(|(k, v)| {
+            let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("any");
+            let req = if required.contains(&k.as_str()) { " (required)" } else { "" };
+            format!("{k}: {ty}{req}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 enum Prepared {
     Ready {
         index: usize,
@@ -325,7 +345,11 @@ fn prepare_call(
             result: error_result(
                 &call.id,
                 &call.name,
-                &format!("Invalid arguments for tool {}: {e}", call.name),
+                &format!(
+                    "Invalid arguments for tool {}: {e}. Expected: {}. Re-issue the call with corrected arguments.",
+                    call.name,
+                    schema_summary(&schema)
+                ),
             ),
         };
     }
