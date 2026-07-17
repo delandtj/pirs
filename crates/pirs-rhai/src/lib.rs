@@ -40,6 +40,7 @@ fn build_engine(state: &StateStore) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(200_000);
     engine.set_max_call_levels(32);
+    engine.set_max_expr_depths(128, 128);
 
     let get_state = Arc::clone(state);
     engine.register_fn("state_get", move |key: &str| -> Dynamic {
@@ -57,7 +58,90 @@ fn build_engine(state: &StateStore) -> Engine {
     engine.register_fn("state_del", move |key: &str| {
         del_state.lock().unwrap().remove(key);
     });
+    engine.register_fn("exec", |command: &str| -> rhai::Map {
+        exec_impl(command, 30)
+    });
+    engine.register_fn("exec", |command: &str, timeout_secs: rhai::INT| -> rhai::Map {
+        exec_impl(command, timeout_secs.max(1) as u64)
+    });
     engine
+}
+
+fn exec_impl(command: &str, timeout_secs: u64) -> rhai::Map {
+    let mut map = rhai::Map::new();
+    let spawned = std::process::Command::new("/bin/bash")
+        .arg("-c")
+        .arg(command)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => {
+            map.insert("output".into(), format!("spawn failed: {e}").into());
+            map.insert("code".into(), (-1).into());
+            map.insert("timedOut".into(), false.into());
+            return map;
+        }
+    };
+    let pid = child.id();
+
+    fn read_all<R: std::io::Read + Send + 'static>(r: R) -> std::sync::mpsc::Receiver<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let mut r = r;
+            use std::io::Read;
+            let _ = r.read_to_string(&mut s);
+            let _ = tx.send(s);
+        });
+        rx
+    }
+    let out_rx = read_all(child.stdout.take().expect("piped"));
+    let err_rx = read_all(child.stderr.take().expect("piped"));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut status = None;
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(s)) => {
+                status = Some(s);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    timed_out = true;
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
+                    let _ = child.wait();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => break,
+        }
+    }
+    let stdout = out_rx.recv().unwrap_or_default();
+    let stderr = err_rx.recv().unwrap_or_default();
+    let mut combined = stdout;
+    combined.push_str(&stderr);
+    if combined.chars().count() > 10_000 {
+        combined = format!(
+            "{}...[truncated]",
+            combined.chars().take(10_000).collect::<String>()
+        );
+    }
+    map.insert("output".into(), combined.into());
+    map.insert(
+        "code".into(),
+        Dynamic::from(status.and_then(|s| s.code()).unwrap_or(-1) as i64),
+    );
+    map.insert("timedOut".into(), timed_out.into());
+    map
 }
 
 impl ExtensionHost {
