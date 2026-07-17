@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+pub mod anthropic;
 pub mod openai;
 pub mod sse;
+pub use anthropic::AnthropicClient;
 pub use openai::OpenAiCompat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

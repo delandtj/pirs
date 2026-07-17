@@ -29,6 +29,10 @@ struct Cli {
     #[arg(short, long, env = "PIRS_MODEL", default_value = "gpt-4o-mini")]
     model: String,
 
+    /// LLM provider: openai (OpenAI-compatible) or anthropic
+    #[arg(long, env = "PIRS_PROVIDER", default_value = "openai")]
+    provider: String,
+
     /// OpenAI-compatible base URL
     #[arg(long, env = "OPENAI_BASE_URL")]
     base_url: Option<String>,
@@ -200,8 +204,20 @@ async fn main() -> anyhow::Result<()> {
     let api_key = cli
         .api_key
         .clone()
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-        .context("no API key: pass --api-key or set OPENAI_API_KEY")?;
+        .or_else(|| {
+            if cli.provider == "anthropic" {
+                std::env::var("ANTHROPIC_API_KEY").ok()
+            } else {
+                std::env::var("OPENAI_API_KEY").ok()
+            }
+        })
+        .with_context(|| {
+            if cli.provider == "anthropic" {
+                "no API key: pass --api-key or set ANTHROPIC_API_KEY"
+            } else {
+                "no API key: pass --api-key or set OPENAI_API_KEY"
+            }
+        })?;
 
     if cli.mode == "rpc" {
         return rpc_mode::run(rpc_mode::RpcOptions {
@@ -217,11 +233,20 @@ async fn main() -> anyhow::Result<()> {
         bail!("unknown mode: {} (expected repl|rpc)", cli.mode);
     }
 
-    let provider = Arc::new(
-        OpenAiCompat::new(cli.base_url.clone())
-            .with_max_retries(cli.max_retries)
-            .with_cache_key(format!("pirs-{}-{}", std::process::id(), cli.model)),
-    );
+    let provider: Arc<dyn pirs_ai::LlmProvider> = if cli.provider == "anthropic" {
+        Arc::new(
+            pirs_ai::AnthropicClient::new(cli.base_url.clone())
+                .with_max_retries(cli.max_retries),
+        )
+    } else if cli.provider == "openai" {
+        Arc::new(
+            OpenAiCompat::new(cli.base_url.clone())
+                .with_max_retries(cli.max_retries)
+                .with_cache_key(format!("pirs-{}-{}", std::process::id(), cli.model)),
+        )
+    } else {
+        anyhow::bail!("unknown provider '{}' (expected openai|anthropic)", cli.provider);
+    };
     let usage_slot: std::sync::Arc<std::sync::Mutex<pirs_ai::Usage>> =
         std::sync::Arc::new(std::sync::Mutex::new(pirs_ai::Usage::default()));
 
@@ -244,9 +269,7 @@ async fn main() -> anyhow::Result<()> {
         None
     } else {
         let mut h = pirs_rhai::ExtensionHost::new();
-        let runner_provider = std::sync::Arc::new(
-            pirs_ai::OpenAiCompat::new(cli.base_url.clone()).with_max_retries(cli.max_retries),
-        );
+        let runner_provider = std::sync::Arc::clone(&provider);
         let runner_completion = CompletionOptions {
             api_key: cli.api_key.clone().or_else(|| std::env::var("OPENAI_API_KEY").ok()),
             ..Default::default()
@@ -378,9 +401,16 @@ async fn main() -> anyhow::Result<()> {
     };
 
     {
-        let delegate_provider = std::sync::Arc::new(
-            pirs_ai::OpenAiCompat::new(cli.base_url.clone()).with_max_retries(cli.max_retries),
-        );
+        let delegate_provider: std::sync::Arc<dyn pirs_ai::LlmProvider> = if cli.provider == "anthropic" {
+            std::sync::Arc::new(
+                pirs_ai::AnthropicClient::new(cli.base_url.clone())
+                    .with_max_retries(cli.max_retries),
+            )
+        } else {
+            std::sync::Arc::new(
+                pirs_ai::OpenAiCompat::new(cli.base_url.clone()).with_max_retries(cli.max_retries),
+            )
+        };
         let delegate_completion = CompletionOptions {
             api_key: cli.api_key.clone().or_else(|| std::env::var("OPENAI_API_KEY").ok()),
             ..Default::default()

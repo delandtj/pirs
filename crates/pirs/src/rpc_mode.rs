@@ -36,9 +36,18 @@ enum Cmd {
 
 pub async fn run(opts: RpcOptions) -> anyhow::Result<()> {
     let cwd = &opts.cwd;
-    let provider = std::sync::Arc::new(
-        pirs_ai::OpenAiCompat::new(opts.base_url.clone()).with_max_retries(opts.max_retries),
-    );
+    let provider: std::sync::Arc<dyn pirs_ai::LlmProvider> =
+        if std::env::var("PIRS_PROVIDER").as_deref() == Ok("anthropic") {
+            std::sync::Arc::new(
+                pirs_ai::AnthropicClient::new(opts.base_url.clone())
+                    .with_max_retries(opts.max_retries),
+            )
+        } else {
+            std::sync::Arc::new(
+                pirs_ai::OpenAiCompat::new(opts.base_url.clone())
+                    .with_max_retries(opts.max_retries),
+            )
+        };
 
     let mut tools: Vec<Arc<dyn AgentTool>> = pirs_tools::default_tools(cwd.clone());
     let mut hooks = Hooks::default();

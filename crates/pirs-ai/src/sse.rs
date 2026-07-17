@@ -4,6 +4,31 @@ pub struct SseStream {
     inner: futures_util::stream::BoxStream<'static, Result<String, crate::AiError>>,
 }
 
+pub struct SseEventStream {
+    inner: futures_util::stream::BoxStream<'static, Result<SseEvent, crate::AiError>>,
+}
+
+impl SseEventStream {
+    pub fn new(response: reqwest::Response) -> Self {
+        let stream = response
+            .bytes_stream()
+            .scan(Vec::new(), |buf: &mut Vec<u8>, chunk| {
+                let events = match chunk {
+                    Ok(bytes) => feed_events(buf, &bytes).into_iter().map(Ok).collect(),
+                    Err(e) => vec![Err(crate::AiError::Network(e))],
+                };
+                std::future::ready(Some(futures_util::stream::iter(events)))
+            })
+            .flatten()
+            .boxed();
+        SseEventStream { inner: stream }
+    }
+
+    pub async fn next(&mut self) -> Option<Result<SseEvent, crate::AiError>> {
+        self.inner.next().await
+    }
+}
+
 impl SseStream {
     pub fn new(response: reqwest::Response) -> Self {
         let stream = response
@@ -25,8 +50,22 @@ impl SseStream {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SseEvent {
+    pub event: Option<String>,
+    pub data: String,
+}
+
 #[doc(hidden)]
 pub fn feed(buf: &mut Vec<u8>, bytes: &[u8]) -> Vec<String> {
+    feed_events(buf, bytes)
+        .into_iter()
+        .map(|e| e.data)
+        .collect()
+}
+
+#[doc(hidden)]
+pub fn feed_events(buf: &mut Vec<u8>, bytes: &[u8]) -> Vec<SseEvent> {
     buf.extend_from_slice(bytes);
     let mut events = Vec::new();
     while let Some((pos, delim_len)) = find_event_boundary(buf) {
@@ -37,8 +76,11 @@ pub fn feed(buf: &mut Vec<u8>, bytes: &[u8]) -> Vec<String> {
             continue;
         }
         let mut data = String::new();
+        let mut event = None;
         for line in body.lines() {
-            if let Some(rest) = line.strip_prefix("data:") {
+            if let Some(rest) = line.strip_prefix("event:") {
+                event = Some(rest.trim().to_string());
+            } else if let Some(rest) = line.strip_prefix("data:") {
                 if !data.is_empty() {
                     data.push('\n');
                 }
@@ -46,7 +88,7 @@ pub fn feed(buf: &mut Vec<u8>, bytes: &[u8]) -> Vec<String> {
             }
         }
         if !data.is_empty() {
-            events.push(data);
+            events.push(SseEvent { event, data });
         }
     }
     events
