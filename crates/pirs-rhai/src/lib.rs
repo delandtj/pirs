@@ -45,7 +45,10 @@ impl ExtensionHost {
     pub fn load_default_dirs(&mut self, cwd: &Path) {
         let mut dirs = vec![cwd.join(".pirs").join("extensions")];
         if let Ok(home) = std::env::var("HOME") {
-            dirs.push(Path::new(&home).join(".pirs").join("extensions"));
+            let global = Path::new(&home).join(".pirs").join("extensions");
+            if !dirs.contains(&global) {
+                dirs.push(global);
+            }
         }
         for dir in dirs {
             let Ok(read) = std::fs::read_dir(&dir) else {
