@@ -11,12 +11,17 @@ use rustyline::DefaultEditor;
 
 mod session;
 mod system_prompt;
+mod rpc_mode;
 
 #[derive(Parser)]
 #[command(name = "pirs", about = "Rust port of the pi coding agent, extensible via rhai")]
 struct Cli {
     /// One-shot prompt; if omitted, starts the interactive REPL
     prompt: Option<String>,
+
+    /// Run mode: interactive REPL or headless JSONL-over-stdio RPC
+    #[arg(long, default_value = "repl")]
+    mode: String,
 
     /// Model id to use
     #[arg(short, long, env = "PIRS_MODEL", default_value = "gpt-4o-mini")]
@@ -145,6 +150,20 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .or_else(|| std::env::var("OPENAI_API_KEY").ok())
         .context("no API key: pass --api-key or set OPENAI_API_KEY")?;
+
+    if cli.mode == "rpc" {
+        return rpc_mode::run(rpc_mode::RpcOptions {
+            cwd: cwd.clone(),
+            model: cli.model.clone(),
+            base_url: cli.base_url.clone(),
+            api_key,
+            max_retries: cli.max_retries,
+        })
+        .await;
+    }
+    if cli.mode != "repl" {
+        bail!("unknown mode: {} (expected repl|rpc)", cli.mode);
+    }
 
     let provider = Arc::new(
         OpenAiCompat::new(cli.base_url.clone()).with_max_retries(cli.max_retries),

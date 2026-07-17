@@ -151,15 +151,24 @@ impl Agent {
     }
 
     async fn run_many(&mut self, prompts: Vec<Message>) -> Result<Vec<Message>, AgentError> {
+        let run = self.begin_prompt(prompts)?;
+        let (full_messages, new_messages) = run.await;
+        self.complete_run(full_messages);
+        Ok(new_messages)
+    }
+
+    /// Starts a run, returning an owned future resolving to
+    /// `(full_messages, new_messages)`. The caller must pass the full list to
+    /// `complete_run` (even on abort/error). While the future is alive the
+    /// agent stays usable for `steer`/`follow_up`/`cancel`.
+    pub fn begin_prompt(
+        &mut self,
+        prompts: Vec<Message>,
+    ) -> Result<impl std::future::Future<Output = (Vec<Message>, Vec<Message>)> + Send + 'static, AgentError>
+    {
         if self.running.swap(true, Ordering::SeqCst) {
             return Err(AgentError::AlreadyRunning);
         }
-        let result = self.run_inner(prompts).await;
-        self.running.store(false, Ordering::SeqCst);
-        result
-    }
-
-    async fn run_inner(&mut self, prompts: Vec<Message>) -> Result<Vec<Message>, AgentError> {
         self.cancel = CancellationToken::new();
 
         let steering = Arc::clone(&self.steering);
@@ -205,19 +214,21 @@ impl Agent {
             hooks,
         };
 
-        let new_messages = run_agent_loop(
-            prompts,
-            &mut context,
-            &self.tools,
-            &self.provider,
-            &config,
-            &emit,
-            self.cancel.clone(),
-        )
-        .await;
+        let tools = self.tools.clone();
+        let provider = Arc::clone(&self.provider);
+        let cancel = self.cancel.clone();
 
-        self.messages = context.messages;
-        Ok(new_messages)
+        Ok(async move {
+            let new_messages =
+                run_agent_loop(prompts, &mut context, &tools, &provider, &config, &emit, cancel)
+                    .await;
+            (context.messages, new_messages)
+        })
+    }
+
+    pub fn complete_run(&mut self, full_messages: Vec<Message>) {
+        self.messages = full_messages;
+        self.running.store(false, Ordering::SeqCst);
     }
 }
 
