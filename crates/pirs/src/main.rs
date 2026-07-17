@@ -222,6 +222,8 @@ async fn main() -> anyhow::Result<()> {
             .with_max_retries(cli.max_retries)
             .with_cache_key(format!("pirs-{}-{}", std::process::id(), cli.model)),
     );
+    let usage_slot: std::sync::Arc<std::sync::Mutex<pirs_ai::Usage>> =
+        std::sync::Arc::new(std::sync::Mutex::new(pirs_ai::Usage::default()));
 
     let mut tools: Vec<Arc<dyn AgentTool>> = pirs_tools::default_tools(cwd.clone());
     let mut hooks = Hooks::default();
@@ -252,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         let runner_model = cli.model.clone();
         let runner_cwd = cwd.clone();
         let policy_slot_run = std::sync::Arc::clone(&policy_slot);
+        let usage_slot_run = std::sync::Arc::clone(&usage_slot);
         h.set_subagent_runner(std::sync::Arc::new(
             move |task: String, model: Option<String>| {
                 let provider = std::sync::Arc::clone(&runner_provider);
@@ -259,6 +262,7 @@ async fn main() -> anyhow::Result<()> {
                 let cwd = runner_cwd.clone();
                 let model = model.unwrap_or_else(|| runner_model.clone());
                 let policy = policy_slot_run.lock().unwrap().clone();
+                let usage_slot = usage_slot_run.clone();
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -276,6 +280,7 @@ async fn main() -> anyhow::Result<()> {
                             .with_hooks(hooks)
                             .with_compaction(None);
                         let new = agent.prompt(&task).await.map_err(|e| e.to_string())?;
+                        *usage_slot.lock().unwrap() += agent.usage_report().grand_total();
                         new.iter()
                             .rev()
                             .find_map(|m| match m {
@@ -433,6 +438,13 @@ async fn main() -> anyhow::Result<()> {
         .with_compaction(compaction)
         .with_visible_tools(visible)
         .with_tool_execution(execution);
+    agent.set_extra_usage_handle(usage_slot.clone());
+    {
+        let steer = agent.steer_sender();
+        pirs_agent::jobs::registry().set_notifier(std::sync::Arc::new(move |msg| {
+            steer(Message::user(msg));
+        }));
+    }
     let approval_shared = gate.shared_mode();
 
     let session_path = session::session_path(&cwd)?;
@@ -476,7 +488,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(prompt) = cli.prompt.take() {
-        run_turn(&mut agent, &prompt, &printer, &session_path, approval_mode).await?;
+        run_turn(&mut agent, &prompt, &printer, &session_path, approval_mode, host.as_ref()).await?;
         eprintln!();
         print_usage(&agent.usage_report());
         return Ok(());
@@ -491,7 +503,14 @@ async fn run_turn(
     _printer: &Arc<Printer>,
     session_path: &Path,
     approval_mode: approval::ApprovalMode,
+    host: Option<&std::sync::Arc<pirs_rhai::ExtensionHost>>,
 ) -> anyhow::Result<()> {
+    let session_file = session_path.to_path_buf();
+    agent.subscribe(Arc::new(move |event: pirs_agent::AgentEvent| {
+        if let pirs_agent::AgentEvent::MessageEnd { message } = event {
+            let _ = session::append(&session_file, &[*message]);
+        }
+    }));
     let cancel = agent.cancel_handle();
     let steer_handle = if approval_mode == approval::ApprovalMode::Ask {
         None
@@ -512,8 +531,12 @@ async fn run_turn(
         h.stop();
     }
 
-    let new_messages = result?;
-    session::append(session_path, &new_messages)?;
+    result?;
+    if let Some(h) = host {
+        for err in h.drain_hook_errors() {
+            eprintln!("[extension error] {err}");
+        }
+    }
     Ok(())
 }
 
@@ -588,7 +611,7 @@ async fn repl(
                     continue;
                 }
                 let mode = *approval_shared.lock().unwrap();
-                if let Err(e) = run_turn(agent, line, printer, session_path, mode).await {
+                if let Err(e) = run_turn(agent, line, printer, session_path, mode, host).await {
                     eprintln!("[error: {e}]");
                 }
             }
@@ -711,7 +734,7 @@ async fn handle_command(
                 if let Some(fc) = file_commands.iter().find(|c| c.name == cmd_name) {
                     let prompt = discovery::expand_command(fc, arg);
                     let mode = *approval_shared.lock().unwrap();
-                    if let Err(e) = run_turn(agent, &prompt, printer, session_path, mode).await {
+                    if let Err(e) = run_turn(agent, &prompt, printer, session_path, mode, host).await {
                         eprintln!("[error: {e}]");
                     }
                 } else {

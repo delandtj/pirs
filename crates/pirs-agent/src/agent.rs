@@ -113,6 +113,10 @@ impl Agent {
         Arc::clone(&self.extra_usage)
     }
 
+    pub fn set_extra_usage_handle(&mut self, handle: Arc<Mutex<pirs_ai::Usage>>) {
+        self.extra_usage = handle;
+    }
+
     pub async fn compact_now(&mut self) -> bool {
         let Some(cfg) = self.compaction.clone() else {
             return false;

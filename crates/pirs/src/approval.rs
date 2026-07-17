@@ -105,6 +105,7 @@ impl ApprovalGate {
         }
     }
 
+    #[cfg(test)]
     pub fn with_prompter(mut self, f: impl Fn(&str) -> String + Send + Sync + 'static) -> Self {
         self.prompter = Arc::new(f);
         self
@@ -114,6 +115,7 @@ impl ApprovalGate {
         Arc::clone(&self.mode)
     }
 
+    #[allow(dead_code)]
     pub fn mode(&self) -> ApprovalMode {
         *self.mode.lock().unwrap()
     }

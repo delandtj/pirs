@@ -42,6 +42,7 @@ pub struct ExtensionHost {
     tool_registry: Vec<RegisteredTool>,
     command_registry: Vec<RegisteredCommand>,
     subagent_runner: Mutex<Option<SubagentRunner>>,
+    hook_errors: Mutex<Vec<String>>,
     pub load_errors: Vec<String>,
 }
 
@@ -189,7 +190,21 @@ impl ExtensionHost {
             tool_registry: Vec::new(),
             command_registry: Vec::new(),
             subagent_runner: Mutex::new(None),
+            hook_errors: Mutex::new(Vec::new()),
             load_errors: Vec::new(),
+        }
+    }
+
+    pub fn drain_hook_errors(&self) -> Vec<String> {
+        std::mem::take(&mut *self.hook_errors.lock().unwrap())
+    }
+
+    fn record_error(&self, what: &str, e: impl std::fmt::Display) {
+        let msg = format!("{what}: {e}");
+        tracing::warn!("{msg}");
+        let mut errors = self.hook_errors.lock().unwrap();
+        if errors.len() < 100 {
+            errors.push(msg);
         }
     }
 
@@ -626,10 +641,10 @@ impl ExtensionHost {
                                 "on_context returned invalid messages: {e}"
                             ),
                         },
-                        Err(e) => tracing::warn!("on_context returned non-JSON value: {e}"),
+                        Err(e) => self.record_error("on_context", format!("returned non-JSON value: {e}")),
                     }
                 }
-                Err(e) => tracing::warn!("on_context failed: {e}"),
+                Err(e) => self.record_error("on_context", e),
             }
         });
         current
@@ -652,7 +667,7 @@ impl ExtensionHost {
                 Ok(d) => {
                     stop = d.as_bool().unwrap_or(false);
                 }
-                Err(e) => tracing::warn!("on_should_stop failed: {e}"),
+                Err(e) => self.record_error("on_should_stop", e),
             }
         });
         stop
@@ -663,7 +678,7 @@ impl ExtensionHost {
         self.for_each_with(ExtensionFlag::Steering, |host, i| {
             match host.call_extension(i, "on_steering", ()) {
                 Ok(d) => out.extend(dynamic_to_messages(&d)),
-                Err(e) => tracing::warn!("on_steering failed: {e}"),
+                Err(e) => self.record_error("on_steering", e),
             }
         });
         out
@@ -674,7 +689,7 @@ impl ExtensionHost {
         self.for_each_with(ExtensionFlag::FollowUp, |host, i| {
             match host.call_extension(i, "on_follow_up", ()) {
                 Ok(d) => out.extend(dynamic_to_messages(&d)),
-                Err(e) => tracing::warn!("on_follow_up failed: {e}"),
+                Err(e) => self.record_error("on_follow_up", e),
             }
         });
         out
@@ -683,10 +698,8 @@ impl ExtensionHost {
     fn dispatch_event(&self, event: &pirs_agent::AgentEvent) {
         let (ty, data) = event_to_rhai(event);
         self.for_each_with(ExtensionFlag::Event, |host, i| {
-            if let Err(e) =
-                host.call_extension(i, "on_event", (ty.clone(), data.clone()))
-            {
-                tracing::warn!("on_event failed: {e}");
+            if let Err(e) = host.call_extension(i, "on_event", (ty.clone(), data.clone())) {
+                host.record_error("on_event", e);
             }
         });
     }

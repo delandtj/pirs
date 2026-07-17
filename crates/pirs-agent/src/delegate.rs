@@ -44,6 +44,103 @@ impl DelegateTool {
     }
 }
 
+impl DelegateTool {
+    async fn execute_background(&self, task: String, model: String) -> anyhow::Result<ToolOutput> {
+        let provider = Arc::clone(&self.provider);
+        let completion = self.completion.clone();
+        let make_tools = Arc::clone(&self.make_tools);
+        let policy = self.policy_hooks.lock().unwrap().clone();
+
+        let (id, _job) = crate::jobs::registry().register(
+            crate::jobs::JobKind::Agent,
+            task.chars().take(80).collect(),
+            std::env::temp_dir().join("pirs-job-pending.log"),
+            None,
+        );
+        let out_path = std::env::temp_dir().join(format!("pirs-job-{id}.log"));
+        {
+            let registry = crate::jobs::registry();
+            let job = registry.get(id).unwrap();
+            job.lock().unwrap().output_path = out_path.clone();
+        }
+
+        let progress: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+        let progress2 = Arc::clone(&progress);
+        let task_for_thread = task.clone();
+        let task_for_desc = task.clone();
+
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            rt.block_on(async move {
+                let mut hooks = Hooks::default();
+                if let Some((b, a)) = policy {
+                    hooks.before_tool_call = Some(b);
+                    hooks.after_tool_call = Some(a);
+                }
+                let mut agent = Agent::new(provider, &model)
+                    .with_tools(make_tools())
+                    .with_completion(completion)
+                    .with_hooks(hooks)
+                    .with_compaction(None);
+                {
+                    let progress = Arc::clone(&progress2);
+                    agent.subscribe(Arc::new(move |event: crate::events::AgentEvent| {
+                        if let crate::events::AgentEvent::MessageEnd { message } = event {
+                            if let pirs_ai::Message::Assistant(a) = &*message {
+                                *progress.lock().unwrap() = a.text();
+                            }
+                        }
+                    }));
+                }
+                let steer = agent.steer_sender();
+                crate::jobs::registry().set_steer(id, Arc::new(move |s: String| {
+                    steer(pirs_ai::Message::user(s));
+                }));
+                crate::jobs::registry()
+                    .set_progress_handle(id, Arc::clone(&progress2));
+                let result = agent.prompt(&task_for_thread).await;
+                let (status, answer) = match result {
+                    Ok(new) => {
+                        let text = new
+                            .iter()
+                            .rev()
+                            .find_map(|m| match m {
+                                pirs_ai::Message::Assistant(a) if !a.text().trim().is_empty() => {
+                                    Some(a.text())
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| "(no answer)".to_string());
+                        (0, text)
+                    }
+                    Err(e) => (1, format!("error: {e}")),
+                };
+                let _ = std::fs::write(&out_path, &answer);
+                crate::jobs::registry().set_status(
+                    id,
+                    crate::jobs::JobStatus::Exited(status),
+                );
+                crate::jobs::registry().notify(format!(
+                    "background agent #{id} finished: {}",
+                    answer.chars().take(200).collect::<String>()
+                ));
+            });
+        });
+
+        let _ = task_for_desc;
+        Ok(ToolOutput::text(format!(
+            "background agent #{id} started on task: {}. Use jobs/job_output/job_kill/job_steer to manage it.",
+            task.chars().take(80).collect::<String>()
+        )))
+    }
+}
+
 #[async_trait]
 impl AgentTool for DelegateTool {
     fn name(&self) -> &str {
@@ -65,6 +162,10 @@ impl AgentTool for DelegateTool {
                 "model": {
                     "type": "string",
                     "description": "Optional model id override for the sub-agent (e.g. a cheaper/faster model for simple steps). Defaults to the current model."
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run the sub-agent as a background job and return immediately with a job id. Use jobs/job_output/job_kill/job_steer to manage it."
                 }
             },
             "required": ["task"]
@@ -94,6 +195,15 @@ impl AgentTool for DelegateTool {
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string())
             .unwrap_or_else(|| self.model.clone());
+
+        if ctx
+            .args
+            .get("background")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return self.execute_background(task, model).await;
+        }
 
         ctx.emit_update(format!("sub-agent started ({model}): {task}"));
 

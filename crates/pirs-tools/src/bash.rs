@@ -18,6 +18,8 @@ struct BashArgs {
     command: String,
     /// Timeout in seconds; the process tree is killed on expiry
     timeout: Option<u64>,
+    /// Run in the background as a job; returns immediately with a job id
+    background: Option<bool>,
 }
 
 pub struct BashTool {
@@ -52,6 +54,13 @@ impl AgentTool for BashTool {
         let args: BashArgs = serde_json::from_value(ctx.args.clone())?;
         if !self.cwd.exists() {
             bail!("working directory {} does not exist", self.cwd.display());
+        }
+        if args.background.unwrap_or(false) {
+            let (id, path) = crate::job_tools::spawn_bash_job(&self.cwd, &args.command)?;
+            return Ok(ToolOutput::text(format!(
+                "background job #{id} started (output: {}). Use jobs/job_output/job_kill to manage it.",
+                path.display()
+            )));
         }
         run_command(&self.cwd, &args.command, args.timeout, &ctx).await
     }

@@ -507,3 +507,68 @@ async fn delegate_inherits_policy_hooks() {
         });
     assert!(sub_turn2.is_some(), "policy hook must apply inside sub-agent: {calls:?}");
 }
+
+#[tokio::test]
+async fn delegate_background_job_completes_and_is_steerable() {
+    use pirs_agent::delegate::DelegateTool;
+    use pirs_agent::jobs::{self, JobStatus};
+
+    let provider = Arc::new(MockProvider::new(vec![
+        tool_call_msg("c1", "delegate", json!({"task": "short job", "background": true})),
+        text_msg("main done"),
+    ]));
+    let sub_provider = Arc::new(MockProvider::new(vec![text_msg("bg answer")]));
+    let delegate = DelegateTool::new(
+        sub_provider,
+        "mock-model",
+        CompletionOptions::default(),
+        || vec![Arc::new(EchoTool)],
+    );
+    let mut agent = Agent::new(provider, "mock-model").with_tools(vec![delegate]);
+    let new = agent.prompt("go").await.unwrap();
+
+    let started = new.iter().any(|m| matches!(
+        m,
+        Message::ToolResult(r) if r.content[0].as_text().unwrap().contains("background agent #")
+    ));
+    assert!(started, "{new:?}");
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let registry = jobs::registry();
+    let list = registry.list();
+    let finished = list.iter().find(|l| l.contains("agent") && l.contains("exited(0)"));
+    assert!(finished.is_some(), "{list:?}");
+    let id: u64 = finished
+        .unwrap()
+        .trim_start_matches('#')
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let job = registry.get(id).unwrap();
+    let path = job.lock().unwrap().output_path.clone();
+    let answer = std::fs::read_to_string(path).unwrap();
+    assert_eq!(answer, "bg answer");
+    assert_eq!(job.lock().unwrap().status, JobStatus::Exited(0));
+}
+
+#[tokio::test]
+async fn bash_background_job_runs_to_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = pirs_tools::BashTool::new(dir.path().to_path_buf());
+    let out = tool
+        .execute(pirs_agent::ToolExecContext {
+            tool_call_id: "t".into(),
+            args: json!({"command": "sleep 0.2; echo done > bg.txt", "background": true}),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            on_update: None,
+        })
+        .await
+        .unwrap();
+    assert!(out.content[0].as_text().unwrap().contains("background job #"));
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    assert!(dir.path().join("bg.txt").exists());
+    let list = pirs_agent::jobs::registry().list();
+    assert!(list.iter().any(|l| l.contains("exited(0)")), "{list:?}");
+}

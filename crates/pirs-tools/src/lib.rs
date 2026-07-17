@@ -5,6 +5,7 @@ use pirs_agent::AgentTool;
 
 pub mod bash;
 pub mod edit;
+pub mod job_tools;
 pub mod filelock;
 pub mod find;
 pub mod grep;
@@ -23,7 +24,7 @@ pub use read::ReadTool;
 pub use write::WriteTool;
 
 pub fn default_tools(cwd: PathBuf) -> Vec<Arc<dyn AgentTool>> {
-    vec![
+    let mut tools: Vec<Arc<dyn AgentTool>> = vec![
         Arc::new(BashTool::new(cwd.clone())),
         Arc::new(ReadTool::new(cwd.clone())),
         Arc::new(EditTool::new(cwd.clone())),
@@ -31,5 +32,9 @@ pub fn default_tools(cwd: PathBuf) -> Vec<Arc<dyn AgentTool>> {
         Arc::new(GrepTool::new(cwd.clone())),
         Arc::new(FindTool::new(cwd.clone())),
         Arc::new(LsTool::new(cwd)),
-    ]
+    ];
+    for t in job_tools::tools() {
+        tools.push(std::sync::Arc::from(t));
+    }
+    tools
 }

@@ -18,4 +18,6 @@ futures = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+pirs-tools = { workspace = true }
+tempfile = "3"
 tracing = { workspace = true }
