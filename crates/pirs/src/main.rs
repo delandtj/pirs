@@ -77,6 +77,10 @@ struct Cli {
     /// Execute tool calls one at a time (helps weaker models)
     #[arg(long)]
     sequential: bool,
+
+    /// Draft each turn with a cheaper model; escalate to the main model only when the draft is rejected
+    #[arg(long)]
+    cascade: Option<String>,
 }
 
 struct Printer {
@@ -461,6 +465,49 @@ async fn main() -> anyhow::Result<()> {
         hooks.before_tool_call = Some(gate.hook());
     }
 
+    let cascade_cfg = cli.cascade.as_ref().map(|draft_model| {
+        let judge_provider = std::sync::Arc::clone(&provider);
+        let judge_model = draft_model.clone();
+        let judge: pirs_agent::agent_loop::CascadeJudge = std::sync::Arc::new(move |draft| {
+            let provider = std::sync::Arc::clone(&judge_provider);
+            let model = judge_model.clone();
+            let draft_text = draft.text();
+            let stop = draft.stop_reason;
+            let has_tool_calls = !draft.tool_calls().is_empty();
+            Box::pin(async move {
+                if matches!(stop, pirs_ai::StopReason::Error | pirs_ai::StopReason::Aborted) {
+                    return false;
+                }
+                if !has_tool_calls && draft_text.trim().is_empty() {
+                    return false;
+                }
+                let prompt = format!(
+                    "Rate this agent turn as ACCEPT or REJECT (one word). Turn: {draft_text}"
+                );
+                let ctx = pirs_ai::Context {
+                    system_prompt: Some("You are a terse judge. Reply ACCEPT or REJECT.".into()),
+                    messages: vec![Message::user(prompt)],
+                    tools: vec![],
+                };
+                let mut stream = provider
+                    .stream(&model, &ctx, &Default::default(), tokio_util::sync::CancellationToken::new())
+                    .await;
+                let mut verdict = String::new();
+                use futures::StreamExt;
+                while let Some(ev) = stream.next().await {
+                    if let pirs_ai::StreamEvent::TextDelta(d) = ev {
+                        verdict.push_str(&d);
+                    }
+                }
+                !verdict.to_uppercase().contains("REJECT")
+            })
+        });
+        pirs_agent::agent_loop::CascadeConfig {
+            draft_model: draft_model.clone(),
+            judge,
+        }
+    });
+
     let mut agent = Agent::new(provider, &cli.model)
         .with_system_prompt(system)
         .with_tools(tools)
@@ -468,7 +515,8 @@ async fn main() -> anyhow::Result<()> {
         .with_hooks(hooks)
         .with_compaction(compaction)
         .with_visible_tools(visible)
-        .with_tool_execution(execution);
+        .with_tool_execution(execution)
+        .with_cascade(cascade_cfg);
     agent.set_extra_usage_handle(usage_slot.clone());
     {
         let steer = agent.steer_sender();
