@@ -1,0 +1,274 @@
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use pirs_agent::{Agent, AgentTool, ExecutionMode, ToolExecContext, ToolOutput};
+use pirs_ai::{
+    AssistantMessage, CompletionOptions, ContentBlock, Context, LlmProvider, Message, StopReason,
+    StreamEvent,
+};
+use serde_json::{json, Value};
+
+struct MockProvider {
+    scripted: Mutex<VecDeque<AssistantMessage>>,
+}
+
+impl MockProvider {
+    fn new(messages: Vec<AssistantMessage>) -> Self {
+        MockProvider {
+            scripted: Mutex::new(messages.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for MockProvider {
+    async fn stream(
+        &self,
+        _model: &str,
+        _context: &Context,
+        _options: &CompletionOptions,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> futures::stream::BoxStream<'static, StreamEvent> {
+        let msg = self
+            .scripted
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| AssistantMessage {
+                content: vec![ContentBlock::text("done")],
+                stop_reason: StopReason::Stop,
+                ..Default::default()
+            });
+        let text = msg.text();
+        let events = vec![
+            StreamEvent::Start,
+            StreamEvent::TextDelta(text),
+            StreamEvent::Done(Box::new(msg)),
+        ];
+        Box::pin(futures::stream::iter(events))
+    }
+}
+
+struct EchoTool;
+
+#[async_trait]
+impl AgentTool for EchoTool {
+    fn name(&self) -> &str {
+        "echo"
+    }
+    fn description(&self) -> &str {
+        "Echo the input text"
+    }
+    fn parameters(&self) -> Value {
+        json!({"type":"object","properties":{"text":{"type":"string"}},"required":["text"]})
+    }
+    async fn execute(&self, ctx: ToolExecContext) -> anyhow::Result<ToolOutput> {
+        Ok(ToolOutput::text(format!(
+            "echo: {}",
+            ctx.args["text"].as_str().unwrap_or("")
+        )))
+    }
+}
+
+struct FailingTool;
+
+#[async_trait]
+impl AgentTool for FailingTool {
+    fn name(&self) -> &str {
+        "fail"
+    }
+    fn description(&self) -> &str {
+        "Always fails"
+    }
+    fn parameters(&self) -> Value {
+        json!({"type":"object"})
+    }
+    async fn execute(&self, _ctx: ToolExecContext) -> anyhow::Result<ToolOutput> {
+        anyhow::bail!("boom")
+    }
+}
+
+struct TerminateTool;
+
+#[async_trait]
+impl AgentTool for TerminateTool {
+    fn name(&self) -> &str {
+        "finish"
+    }
+    fn description(&self) -> &str {
+        "Terminate the loop"
+    }
+    fn parameters(&self) -> Value {
+        json!({"type":"object"})
+    }
+    async fn execute(&self, _ctx: ToolExecContext) -> anyhow::Result<ToolOutput> {
+        Ok(ToolOutput::text("bye").terminate())
+    }
+}
+
+fn tool_call_msg(id: &str, name: &str, args: Value) -> AssistantMessage {
+    AssistantMessage {
+        content: vec![ContentBlock::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: args,
+            thought_signature: None,
+        }],
+        stop_reason: StopReason::ToolUse,
+        ..Default::default()
+    }
+}
+
+fn text_msg(t: &str) -> AssistantMessage {
+    AssistantMessage {
+        content: vec![ContentBlock::text(t)],
+        stop_reason: StopReason::Stop,
+        ..Default::default()
+    }
+}
+
+fn make_agent(provider: MockProvider, tools: Vec<Arc<dyn AgentTool>>) -> Agent {
+    Agent::new(Arc::new(provider), "mock-model").with_tools(tools)
+}
+
+#[tokio::test]
+async fn loop_executes_tool_then_answers() {
+    let provider = MockProvider::new(vec![
+        tool_call_msg("c1", "echo", json!({"text": "hi"})),
+        text_msg("final answer"),
+    ]);
+    let mut agent = make_agent(provider, vec![Arc::new(EchoTool)]);
+    let new = agent.prompt("go").await.unwrap();
+
+    assert!(new.iter().any(|m| matches!(m, Message::ToolResult(r) if r.content[0].as_text() == Some("echo: hi") && !r.is_error)));
+    let last = agent.messages.last().unwrap();
+    match last {
+        Message::Assistant(a) => assert_eq!(a.text(), "final answer"),
+        _ => panic!("expected assistant last"),
+    }
+}
+
+#[tokio::test]
+async fn tool_error_becomes_error_result_and_loop_continues() {
+    let provider = MockProvider::new(vec![
+        tool_call_msg("c1", "fail", json!({})),
+        text_msg("recovered"),
+    ]);
+    let mut agent = make_agent(provider, vec![Arc::new(FailingTool)]);
+    let new = agent.prompt("go").await.unwrap();
+
+    assert!(new.iter().any(
+        |m| matches!(m, Message::ToolResult(r) if r.is_error && r.content[0].as_text() == Some("boom"))
+    ));
+    assert!(matches!(agent.messages.last(), Some(Message::Assistant(a)) if a.text() == "recovered"));
+}
+
+#[tokio::test]
+async fn invalid_args_rejected_without_executing() {
+    let provider = MockProvider::new(vec![
+        tool_call_msg("c1", "echo", json!({"wrong": 1})),
+        text_msg("ok"),
+    ]);
+    let mut agent = make_agent(provider, vec![Arc::new(EchoTool)]);
+    let new = agent.prompt("go").await.unwrap();
+    assert!(new.iter().any(
+        |m| matches!(m, Message::ToolResult(r) if r.is_error && r.content[0].as_text().unwrap().contains("Invalid arguments"))
+    ));
+}
+
+#[tokio::test]
+async fn unknown_tool_reported() {
+    let provider = MockProvider::new(vec![
+        tool_call_msg("c1", "nope", json!({})),
+        text_msg("ok"),
+    ]);
+    let mut agent = make_agent(provider, vec![]);
+    let new = agent.prompt("go").await.unwrap();
+    assert!(new.iter().any(
+        |m| matches!(m, Message::ToolResult(r) if r.is_error && r.content[0].as_text() == Some("Tool nope not found"))
+    ));
+}
+
+#[tokio::test]
+async fn terminate_stops_loop() {
+    let provider = MockProvider::new(vec![tool_call_msg("c1", "finish", json!({}))]);
+    let mut agent = make_agent(provider, vec![Arc::new(TerminateTool)]);
+    let new = agent.prompt("go").await.unwrap();
+    assert!(matches!(new.last(), Some(Message::ToolResult(_))));
+}
+
+#[tokio::test]
+async fn length_stop_reason_fails_tool_calls_without_executing() {
+    let mut msg = tool_call_msg("c1", "echo", json!({"text": "x"}));
+    msg.stop_reason = StopReason::Length;
+    let provider = MockProvider::new(vec![msg, text_msg("after")]);
+    let mut agent = make_agent(provider, vec![Arc::new(EchoTool)]);
+    let new = agent.prompt("go").await.unwrap();
+    assert!(new.iter().any(
+        |m| matches!(m, Message::ToolResult(r) if r.is_error && r.content[0].as_text().unwrap().contains("truncated"))
+    ));
+}
+
+#[tokio::test]
+async fn steering_message_injected_mid_run() {
+    let provider = MockProvider::new(vec![
+        tool_call_msg("c1", "echo", json!({"text": "x"})),
+        text_msg("answer"),
+    ]);
+    let mut agent = make_agent(provider, vec![Arc::new(EchoTool)]);
+    agent.steer(Message::user("steered"));
+    let new = agent.prompt("go").await.unwrap();
+    assert!(new.iter().any(
+        |m| matches!(m, Message::User(u) if matches!(&u.content, pirs_ai::UserContent::Text(t) if t == "steered"))
+    ));
+}
+
+#[tokio::test]
+async fn parallel_results_in_source_order() {
+    let provider = MockProvider::new(vec![
+        AssistantMessage {
+            content: vec![
+                ContentBlock::ToolCall {
+                    id: "a".into(),
+                    name: "echo".into(),
+                    arguments: json!({"text": "1"}),
+                    thought_signature: None,
+                },
+                ContentBlock::ToolCall {
+                    id: "b".into(),
+                    name: "echo".into(),
+                    arguments: json!({"text": "2"}),
+                    thought_signature: None,
+                },
+            ],
+            stop_reason: StopReason::ToolUse,
+            ..Default::default()
+        },
+        text_msg("done"),
+    ]);
+    let mut agent = make_agent(provider, vec![Arc::new(EchoTool)])
+        .with_tool_execution(ExecutionMode::Parallel);
+    let new = agent.prompt("go").await.unwrap();
+    let results: Vec<&str> = new
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult(r) => r.content[0].as_text(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, vec!["echo: 1", "echo: 2"]);
+}
+
+#[tokio::test]
+async fn error_stop_reason_ends_run() {
+    let provider = MockProvider::new(vec![AssistantMessage {
+        stop_reason: StopReason::Error,
+        error_message: Some("api exploded".into()),
+        ..Default::default()
+    }]);
+    let mut agent = make_agent(provider, vec![]);
+    let new = agent.prompt("go").await.unwrap();
+    let last = new.last().unwrap();
+    assert!(matches!(last, Message::Assistant(a) if a.stop_reason == StopReason::Error));
+}
