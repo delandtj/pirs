@@ -5,6 +5,7 @@ use pirs_agent::AgentTool;
 
 pub mod bash;
 pub mod edit;
+pub mod filelock;
 pub mod find;
 pub mod grep;
 pub mod ls;

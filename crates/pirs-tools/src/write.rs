@@ -48,6 +48,7 @@ impl AgentTool for WriteTool {
     async fn execute(&self, ctx: ToolExecContext) -> anyhow::Result<ToolOutput> {
         let args: WriteArgs = serde_json::from_value(ctx.args)?;
         let path = paths::resolve(&self.cwd, &args.path);
+        let _mutation_guard = crate::filelock::lock(&path).await;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;

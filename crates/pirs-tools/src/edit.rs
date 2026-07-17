@@ -62,6 +62,7 @@ impl AgentTool for EditTool {
             bail!("edits must contain at least one replacement");
         }
         let path = paths::resolve(&self.cwd, &args.path);
+        let _mutation_guard = crate::filelock::lock(&path).await;
         let raw = std::fs::read(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         let original = String::from_utf8_lossy(&raw).into_owned();
@@ -269,5 +270,34 @@ mod tests {
         assert_eq!(body, "a\nb\n");
         assert!(!bom);
         assert!(crlf);
+    }
+
+    #[tokio::test]
+    async fn concurrent_edits_all_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "a1\nb2\nc3\nd4\n").unwrap();
+        let tool = std::sync::Arc::new(EditTool::new(dir.path().to_path_buf()));
+
+        let mut handles = Vec::new();
+        for (old, new) in [("a1", "A"), ("b2", "B"), ("c3", "C"), ("d4", "D")] {
+            let tool = std::sync::Arc::clone(&tool);
+            handles.push(tokio::spawn(async move {
+                tool.execute(pirs_agent::ToolExecContext {
+                    tool_call_id: "t".into(),
+                    args: serde_json::json!({
+                        "path": "f.txt",
+                        "edits": [{"oldText": old, "newText": new}]
+                    }),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    on_update: None,
+                })
+                .await
+            }));
+        }
+        for h in handles {
+            h.await.unwrap().unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\nB\nC\nD\n");
     }
 }
