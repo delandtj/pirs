@@ -4,7 +4,9 @@ use pirs_rhai::ExtensionHost;
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn load(name: &str, runner: Option<Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>>) -> Arc<ExtensionHost> {
+type Runner = Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>;
+
+fn load(name: &str, runner: Option<Runner>) -> Arc<ExtensionHost> {
     let path = format!(
         "{}/../../examples/extensions/{name}",
         env!("CARGO_MANIFEST_DIR")
@@ -18,7 +20,7 @@ fn load(name: &str, runner: Option<Arc<dyn Fn(String, Option<String>) -> Result<
     Arc::new(host)
 }
 
-fn ok_runner() -> Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync> {
+fn ok_runner() -> Runner {
     Arc::new(|task: String, _| Ok(format!("REAL ISSUE in: {}", &task[..task.len().min(30)])))
 }
 
@@ -48,7 +50,7 @@ fn critic_spawns_background_review_after_n_edits() {
 
 #[test]
 fn approval2_denies_dangerous_approves_safe() {
-    let runner: Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync> =
+    let runner: Runner =
         Arc::new(|task: String, _| {
             if task.contains("rm -rf /important") {
                 Ok("DENY - deletes data".to_string())
@@ -113,7 +115,7 @@ fn rollback_snapshots_and_restores() {
     let _guard = ENV_LOCK.lock().unwrap();
     let host = load("rollback.rhai", None);
     let tmp = std::env::temp_dir().join(format!("pirs-rb-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
     std::process::Command::new("git")
         .args(["init", "-q"])
         .current_dir(&tmp)
