@@ -41,7 +41,20 @@ fn on_tool_call(id, name, args) {
 }
 ```
 
-Loop hooks: `on_context(messages)`, `on_should_stop(info)`, `on_steering()`, `on_follow_up()`, `on_event(type, data)`. State per extension via `state_get`/`state_set`; shell out via `exec(cmd, timeout_secs)`. See `examples/extensions/` (word_count, weak-model pack).
+Loop hooks: `on_context(messages)`, `on_should_stop(info)`, `on_steering()`, `on_follow_up()`, `on_event(type, data)` (events carry token usage). State per extension via `state_get`/`state_set`; shell out via `exec(cmd, timeout_secs)`; file append/read via `fs_append`/`fs_read`; register slash commands via `register_command(name, desc)` + `fn cmd_<name>(args)` — dispatched by the REPL.
+
+Shipped packs in `examples/extensions/`:
+
+| Pack | Purpose |
+|---|---|
+| `weak-model.rhai` | loop detector, verify-after-edit, plan pinning |
+| `guardrails.rhai` | block destructive bash patterns, ask-first policy |
+| `audit-log.rhai` | tool calls + results to `~/.pirs/audit.jsonl` |
+| `conductor.rhai` | strong-planner/weak-executor guidance + plan tool |
+| `context-janitor.rhai` | shrink stale giant tool outputs in outgoing context |
+| `reviewer.rhai` | force a review pass after file edits before run ends |
+
+rhai gotchas (pinned by tests): interpolation only in backtick strings `` `${x}` ``; string methods like `trim()` mutate in place; no `let mut`; arrays have no `join`/`slice` — loop or `extract()`; `const` doesn't resolve inside nested closures.
 
 ## Orchestrator
 
