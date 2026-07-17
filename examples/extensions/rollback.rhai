@@ -11,7 +11,9 @@ fn snapshot(msg) {
     let snaps = if state_has("snaps") { state_get("snaps") } else { [] };
     snaps.push(oid);
     state_set("snaps", snaps);
-    `${snaps.len() - 1}`
+    let idx = snaps.len() - 1;
+    exec(`git update-ref refs/pirs/turn-${idx} ${oid}`, 10);
+    `${idx}`
 }
 
 fn on_event(ty, data) {
@@ -61,7 +63,7 @@ fn cmd_snapshots(args) {
     }
     let out = "";
     for i in 0..snaps.len() {
-        out = out + `${i}: ${snaps[i]}\n`;
+        out = out + `${i} (refs/pirs/turn-${i}): ${snaps[i]}\n`;
     }
     out
 }

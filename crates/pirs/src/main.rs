@@ -70,6 +70,10 @@ struct Cli {
     #[arg(long, default_value = "128000")]
     context_window: u64,
 
+    /// Disable the code graph (code_map/ast_edit tools, blast-radius notes)
+    #[arg(long)]
+    no_graph: bool,
+
     /// Start with only core tools loaded; model loads more via use_tool
     #[arg(long)]
     tool_diet: bool,
@@ -257,6 +261,26 @@ async fn main() -> anyhow::Result<()> {
 
     let mut tools: Vec<Arc<dyn AgentTool>> = pirs_tools::default_tools(cwd.clone());
     let mut hooks = Hooks::default();
+
+    let graph: Option<std::sync::Arc<pirs_graph::Graph>> = if cli.no_graph {
+        None
+    } else {
+        let start = std::time::Instant::now();
+        let g = std::sync::Arc::new(pirs_graph::Graph::build(&cwd));
+        eprintln!(
+            "[code graph: {} symbols in {:.1}s]",
+            g.symbols.len(),
+            start.elapsed().as_secs_f64()
+        );
+        Some(g)
+    };
+    if let Some(g) = &graph {
+        tools.push(std::sync::Arc::new(pirs_graph::code_map::CodeMapTool::new(
+            std::sync::Arc::clone(g),
+            cwd.clone(),
+        )));
+        tools.push(std::sync::Arc::new(pirs_graph::ast_edit::AstEditTool::new(cwd.clone())));
+    }
     let mut policy_hooks: Option<(
         pirs_agent::events::BeforeToolCallHook,
         pirs_agent::events::AfterToolCallHook,
@@ -346,7 +370,66 @@ async fn main() -> anyhow::Result<()> {
         *policy_slot.lock().unwrap() = policy_hooks.clone();
         if !yolo {
             hooks.before_tool_call = ext_hooks.before_tool_call;
-            hooks.after_tool_call = ext_hooks.after_tool_call;
+            let rhai_after = ext_hooks.after_tool_call;
+            let graph_after = graph.clone().map(|g| {
+                let g = std::sync::Arc::clone(&g);
+                let cwd2 = cwd.clone();
+                let f: pirs_agent::events::AfterToolCallHook = std::sync::Arc::new(move |_id, name, result| {
+                    if (name != "edit" && name != "write") || result.is_error {
+                        return None;
+                    }
+                    let path = result
+                        .details
+                        .as_ref()
+                        .and_then(|d| d.get("path"))
+                        .and_then(|p| p.as_str())
+                        .map(std::path::PathBuf::from)
+                        .or_else(|| {
+                            result
+                                .content
+                                .iter()
+                                .filter_map(|b| b.as_text())
+                                .next()
+                                .and_then(|t| {
+                                    t.rsplit_once(" in ")
+                                        .map(|(_, p)| std::path::PathBuf::from(p.trim()))
+                                })
+                        })?;
+                    let abs = if path.is_absolute() { path } else { cwd2.join(path) };
+                    let mut notes: Vec<String> = Vec::new();
+                    for sym in g.file_symbols(&abs) {
+                        let n = g.callers(&sym.name).len();
+                        if n > 0 {
+                            notes.push(format!("{} ({} caller{})", sym.name, n, if n == 1 { "" } else { "s" }));
+                        }
+                    }
+                    if notes.is_empty() {
+                        return None;
+                    }
+                    let mut content = result.content.clone();
+                    let total_callers: usize = g
+                        .file_symbols(&abs)
+                        .iter()
+                        .map(|s| g.callers(&s.name).len())
+                        .sum();
+                    content.push(pirs_ai::ContentBlock::text(format!(
+                        "Blast radius: {} graph caller(s) of edited symbols: {}",
+                        total_callers,
+                        notes.join(", ")
+                    )));
+                    Some(pirs_agent::ToolResultPatch {
+                        content: Some(content),
+                        ..Default::default()
+                    })
+                });
+                f
+            });
+            hooks.after_tool_call = match (rhai_after, graph_after) {
+                (Some(r), Some(g)) => Some(std::sync::Arc::new(move |id, name, result| {
+                    r(id, name, result).or_else(|| g(id, name, result))
+                })),
+                (a, b) => a.or(b),
+            };
         }
         hooks.transform_context = ext_hooks.transform_context;
         hooks.should_stop_after_turn = ext_hooks.should_stop_after_turn;

@@ -83,6 +83,8 @@ Shipped packs in `examples/extensions/`:
 
 Loop features: `--cascade <draft_model>` drafts each turn on a cheap model and escalates only when the judge rejects it; `spawn_subagent(task, model, tag)` + `inbox()` let scripts run background sub-agents.
 
+Code graph (`--no-graph` to disable): tree-sitter index of the repo (rust/py/ts/go) powering `code_map` (definitions/callers/callees/top/blast — much cheaper than grep+read), `ast_edit` (replace_function_body/rename_symbol/move_function at symbol level), blast-radius notes appended to edit/write results, and a shared (path,mtime) read cache across main and sub-agents. Rollback snapshots are also tagged as git refs (`refs/pirs/turn-N`).
+
 Scripts can also spawn fresh-context sub-agents themselves: `run_subagent(task, model?)`.
 
 rhai gotchas (pinned by tests): interpolation only in backtick strings `` `${x}` ``; string methods like `trim()` mutate in place; no `let mut`; arrays have no `join` — use `str_join(arr, sep)` or a loop; array property access clones (write whole entries back); `const` doesn't resolve inside nested closures.

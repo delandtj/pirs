@@ -161,8 +161,8 @@ fn rollback_snapshots_and_restores() {
     });
 
     let list = host.run_command("snapshots", "").unwrap();
-    assert!(list.contains("0:"), "{list}");
-    assert!(list.contains("1:"), "{list}");
+    assert!(list.contains("refs/pirs/turn-0"), "{list}");
+    assert!(list.contains("refs/pirs/turn-1"), "{list}");
 
     let out = host.run_command("undo", "0").unwrap();
     assert!(out.contains("restored"), "{out}");

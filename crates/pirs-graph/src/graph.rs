@@ -243,7 +243,7 @@ fn walk_symbols(
     cursor: &mut tree_sitter::TreeCursor,
     out: &mut Vec<Symbol>,
 ) {
-    let mut go_deeper = true;
+    let go_deeper = true;
     if let Some((kind, name_node)) = definition_info(lang, &node) {
         let name = node_text(name_node, source).to_string();
         if !name.is_empty() {
