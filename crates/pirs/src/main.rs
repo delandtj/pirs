@@ -643,7 +643,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let approval_shared = gate.shared_mode();
 
-    let mut session_path = session::session_path(&cwd)?;
+    let session_path = session::session_path(&cwd)?;
     if cli.resume {
         match session::load_latest(&cwd) {
             Ok((path, messages)) => {
@@ -744,7 +744,7 @@ async fn run_turn(
     agent: &mut Agent,
     input: &str,
     _printer: &Arc<Printer>,
-    session_path: &Path,
+    _session_path: &Path,
     approval_mode: approval::ApprovalMode,
     host: Option<&std::sync::Arc<pirs_rhai::ExtensionHost>>,
 ) -> anyhow::Result<()> {
