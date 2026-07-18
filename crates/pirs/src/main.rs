@@ -336,7 +336,7 @@ async fn main() -> anyhow::Result<()> {
         let runner_cwd = cwd.clone();
         let policy_slot_run = std::sync::Arc::clone(&policy_slot);
         let usage_slot_run = std::sync::Arc::clone(&usage_slot);
-        let sub_tools_for_run = sub_tools.clone();
+        let sub_tools_for_run = std::sync::Arc::new(sub_tools.clone());
         h.set_subagent_runner(std::sync::Arc::new(
             move |task: String, model: Option<String>| {
                 let provider = std::sync::Arc::clone(&runner_provider);
@@ -345,12 +345,13 @@ async fn main() -> anyhow::Result<()> {
                 let model = model.unwrap_or_else(|| runner_model.clone());
                 let policy = policy_slot_run.lock().unwrap().clone();
                 let usage_slot = usage_slot_run.clone();
+                let sub_tools_for_run = std::sync::Arc::clone(&sub_tools_for_run);
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                         .map_err(|e| e.to_string())?;
-                    let tools = sub_tools_for_run.clone();
+                    let tools = (*sub_tools_for_run).clone();
                     rt.block_on(async move {
                         let mut hooks = pirs_agent::Hooks::default();
                         if let Some((b, a)) = &policy {
