@@ -58,6 +58,8 @@ pub enum IpcRequest {
         label: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         env: Option<std::collections::HashMap<String, String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     List,
     Status {

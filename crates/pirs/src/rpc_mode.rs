@@ -137,6 +137,7 @@ pub async fn run(opts: RpcOptions) -> anyhow::Result<()> {
         api_key: Some(opts.api_key.clone()),
         ..Default::default()
     };
+    let _ = &opts;
 
     let mut agent = Agent::new(provider, &opts.model)
         .with_system_prompt(system)

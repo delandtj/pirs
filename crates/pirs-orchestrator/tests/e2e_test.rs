@@ -34,6 +34,7 @@ async fn orchestrator_end_to_end_over_uds() {
                 "PIRS_TEST_VAR".to_string(),
                 "env-reached-child".to_string(),
             )])),
+            model: Some("weak-model".to_string()),
         })
         .trim(),
     )

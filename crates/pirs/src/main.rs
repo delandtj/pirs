@@ -10,6 +10,7 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
 mod approval;
+mod auth;
 mod serve;
 mod tui;
 mod discovery;
@@ -223,23 +224,18 @@ async fn main() -> anyhow::Result<()> {
     let mut cli = Cli::parse();
     let cwd = std::env::current_dir()?;
 
-    let api_key = cli
-        .api_key
-        .clone()
-        .or_else(|| {
-            if cli.provider == "anthropic" {
-                std::env::var("ANTHROPIC_API_KEY").ok()
-            } else {
-                std::env::var("OPENAI_API_KEY").ok()
-            }
-        })
-        .with_context(|| {
-            if cli.provider == "anthropic" {
-                "no API key: pass --api-key or set ANTHROPIC_API_KEY"
-            } else {
-                "no API key: pass --api-key or set OPENAI_API_KEY"
-            }
-        })?;
+    if cli.prompt.as_deref() == Some("login") || cli.mode == "login" {
+        let provider = if cli.provider == "anthropic" { "anthropic" } else { "openai" };
+        return auth::login(provider);
+    }
+
+    let env_var = if cli.provider == "anthropic" {
+        "ANTHROPIC_API_KEY"
+    } else {
+        "OPENAI_API_KEY"
+    };
+    let api_key = auth::resolve(cli.api_key.as_deref(), &cli.provider, env_var)
+        .with_context(|| format!("no API key: pass --api-key, run `pirs login`, or set {env_var}"))?;
 
     if cli.mode == "rpc" {
         return rpc_mode::run(rpc_mode::RpcOptions {

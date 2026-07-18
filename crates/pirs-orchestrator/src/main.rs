@@ -23,6 +23,8 @@ enum Command {
         cwd: Option<String>,
         #[arg(long)]
         label: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
         /// Extra env var for the instance (KEY=VAL), repeatable
         #[arg(long = "env", value_name = "KEY=VAL")]
         env: Vec<String>,
@@ -52,7 +54,12 @@ async fn main() -> anyhow::Result<()> {
             pirs_orchestrator::server::serve(supervisor).await
         }
         Command::List => one_shot(&IpcRequest::List).await,
-        Command::Spawn { cwd, label, env } => {
+        Command::Spawn {
+            cwd,
+            label,
+            env,
+            model,
+        } => {
             let cwd = match cwd {
                 Some(c) => c,
                 None => std::env::current_dir()?.to_string_lossy().to_string(),
@@ -69,7 +76,13 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Some(map)
             };
-            one_shot(&IpcRequest::Spawn { cwd, label, env }).await
+            one_shot(&IpcRequest::Spawn {
+                cwd,
+                label,
+                env,
+                model,
+            })
+            .await
         }
         Command::Status { instance_id } => {
             one_shot(&IpcRequest::Status { instance_id }).await

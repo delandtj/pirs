@@ -27,6 +27,7 @@ impl RpcProcess {
     pub async fn spawn(
         cwd: &Path,
         env: Option<&std::collections::HashMap<String, String>>,
+        model: Option<&str>,
     ) -> anyhow::Result<Arc<Self>> {
         let bin = resolve_pirs_binary()?;
         let mut cmd = Command::new(&bin);
@@ -36,6 +37,7 @@ impl RpcProcess {
         let mut child = cmd
             .arg("--mode")
             .arg("rpc")
+            .args(model.map(|m| ["-m".to_string(), m.to_string()]).unwrap_or_default())
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
