@@ -13,6 +13,7 @@ mod approval;
 mod auth;
 mod blame;
 mod discovery;
+mod pack;
 mod rpc_mode;
 mod serve;
 mod session;
@@ -280,6 +281,68 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(e) => anyhow::bail!(e),
         };
+    }
+    if let Some(spec) = cli
+        .prompt
+        .clone()
+        .filter(|p| p.starts_with("pack install "))
+    {
+        // pirs pack install <git-url> [--pin <ref>] [--yes] [--force]
+        let args: Vec<&str> = spec
+            .trim_start_matches("pack install ")
+            .split_whitespace()
+            .collect();
+        let Some(url) = args.first().copied() else {
+            anyhow::bail!("usage: pirs pack install <git-url> [--pin <ref>] [--yes] [--force]");
+        };
+        let flag = |name: &str| {
+            args.windows(2)
+                .find(|w| w[0] == name)
+                .map(|w| w[1].to_string())
+        };
+        let pin = flag("--pin");
+        let yes = args.contains(&"--yes");
+        let force = args.contains(&"--force");
+
+        let name = pack::pack_name_from_url(url);
+        eprintln!(
+            "[pack: cloning {url}{}]",
+            pin.as_deref()
+                .map(|p| format!(" @ {p}"))
+                .unwrap_or_default()
+        );
+        let (tmp, head) = pack::clone_pinned(url, pin.as_deref())?;
+        let scripts = pack::collect_scripts(&tmp.path().join("repo"));
+        if scripts.is_empty() {
+            anyhow::bail!("{url}: no .rhai scripts found (root, extensions/, packs/)");
+        }
+        println!("pack {name} @ {head} ({} scripts):", scripts.len());
+        for s in &scripts {
+            let src = std::fs::read_to_string(s).unwrap_or_default();
+            println!(
+                "  {}: {}",
+                s.file_name().and_then(|f| f.to_str()).unwrap_or("?"),
+                pirs_rhai::caps::parse_caps(&src).summary()
+            );
+        }
+        if !yes {
+            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                anyhow::bail!("refusing to install without confirmation (pass --yes)");
+            }
+            eprint!("install into ~/.pirs/extensions? [y/N] ");
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            if !matches!(line.trim(), "y" | "yes" | "Y") {
+                anyhow::bail!("aborted");
+            }
+        }
+        let home = std::env::var("HOME").context("HOME not set")?;
+        let dest = std::path::Path::new(&home).join(".pirs").join("extensions");
+        let installed = pack::install_scripts(&scripts, &dest, force)?;
+        for p in &installed {
+            println!("installed {}", p.display());
+        }
+        return Ok(());
     }
     if let Some(spec) = cli
         .prompt
