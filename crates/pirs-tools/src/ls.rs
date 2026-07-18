@@ -76,6 +76,11 @@ impl AgentTool for LsTool {
         let mut text = entries.join("\n");
         if total > limit {
             text.push_str(&format!("\n[showing {limit} of {total} entries]"));
+        } else if entries.len() < total {
+            text.push_str(&format!(
+                "\n[output truncated at byte cap; showing {} of {total} entries]",
+                entries.len()
+            ));
         }
         if text.is_empty() {
             text = "(empty directory)".to_string();

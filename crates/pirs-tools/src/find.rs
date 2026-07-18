@@ -93,6 +93,8 @@ impl AgentTool for FindTool {
             out.push_str(&format!(
                 "\n[{limit} results limit reached; narrow the pattern]"
             ));
+        } else if out.len() > MAX_BYTES {
+            out.push_str("\n[output truncated at byte cap; narrow the pattern]");
         }
         if out.is_empty() {
             out = "No files found.".to_string();
