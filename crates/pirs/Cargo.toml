@@ -9,6 +9,7 @@ name = "pirs"
 path = "src/main.rs"
 
 [dependencies]
+tempfile = "3"
 pirs-ai = { workspace = true }
 pirs-agent = { workspace = true }
 pirs-tools = { workspace = true }
@@ -32,4 +33,4 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+

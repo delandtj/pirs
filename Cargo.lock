@@ -1533,6 +1533,7 @@ dependencies = [
  "pirs-agent",
  "pirs-ai",
  "rhai",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
