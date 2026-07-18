@@ -25,6 +25,7 @@ pub struct Extension {
     engine: Engine,
     ast: AST,
     scope: Scope<'static>,
+    caps: caps::Caps,
     has_on_tool_call: bool,
     has_on_tool_result: bool,
     has_on_context: bool,
@@ -36,6 +37,8 @@ pub struct Extension {
 
 pub type SubagentRunner =
     Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>;
+
+pub mod caps;
 
 pub struct ExtensionHost {
     extensions: Vec<Mutex<Extension>>,
@@ -89,7 +92,7 @@ pub fn register_query_fn(name: &str, f: impl Fn(&str) -> Vec<String> + Send + Sy
         .push((name.to_string(), std::sync::Arc::new(f)));
 }
 
-fn build_engine(state: &StateStore) -> Engine {
+fn build_engine(state: &StateStore, caps: &caps::Caps) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(200_000);
     engine.set_max_call_levels(32);
@@ -170,8 +173,12 @@ fn build_engine(state: &StateStore) -> Engine {
             .map(|d| d.as_millis() as rhai::INT)
             .unwrap_or(0)
     });
-    engine.register_fn("fs_append", |path: &str, content: &str| -> bool {
+    let caps_append = caps.clone();
+    engine.register_fn("fs_append", move |path: &str, content: &str| -> bool {
         use std::io::Write;
+        if !caps::check_fs(&caps_append, path) {
+            return false;
+        }
         if let Some(parent) = std::path::Path::new(path).parent() {
             if std::fs::create_dir_all(parent).is_err() {
                 return false;
@@ -184,10 +191,18 @@ fn build_engine(state: &StateStore) -> Engine {
             .and_then(|mut f| f.write_all(content.as_bytes()))
             .is_ok()
     });
-    engine.register_fn("fs_read", |path: &str| -> String {
+    let caps_read = caps.clone();
+    engine.register_fn("fs_read", move |path: &str| -> String {
+        if !caps::check_fs(&caps_read, path) {
+            return String::new();
+        }
         std::fs::read_to_string(path).unwrap_or_default()
     });
-    engine.register_fn("fs_write", |path: &str, content: &str| -> bool {
+    let caps_write = caps.clone();
+    engine.register_fn("fs_write", move |path: &str, content: &str| -> bool {
+        if !caps::check_fs(&caps_write, path) {
+            return false;
+        }
         if let Some(parent) = std::path::Path::new(path).parent() {
             if std::fs::create_dir_all(parent).is_err() {
                 return false;
@@ -195,16 +210,31 @@ fn build_engine(state: &StateStore) -> Engine {
         }
         std::fs::write(path, content).is_ok()
     });
-    engine.register_fn("exec", |command: &str| -> rhai::Map {
-        exec_impl(command, 30)
+    let caps_exec = caps.clone();
+    engine.register_fn("exec", move |command: &str| -> rhai::Map {
+        exec_capped(&caps_exec, command, 30)
     });
+    let caps_exec2 = caps.clone();
     engine.register_fn(
         "exec",
-        |command: &str, timeout_secs: rhai::INT| -> rhai::Map {
-            exec_impl(command, timeout_secs.max(1) as u64)
+        move |command: &str, timeout_secs: rhai::INT| -> rhai::Map {
+            exec_capped(&caps_exec2, command, timeout_secs.max(1) as u64)
         },
     );
     engine
+}
+
+/// exec gated by the capability manifest: a blocked command returns a
+/// visible error map instead of running.
+fn exec_capped(caps: &caps::Caps, command: &str, timeout_secs: u64) -> rhai::Map {
+    if let Err(reason) = caps::check_exec(caps, command) {
+        let mut map = rhai::Map::new();
+        map.insert("output".into(), reason.into());
+        map.insert("code".into(), (-1).into());
+        map.insert("timedOut".into(), false.into());
+        return map;
+    }
+    exec_impl(command, timeout_secs)
 }
 
 fn exec_impl(command: &str, timeout_secs: u64) -> rhai::Map {
@@ -386,11 +416,12 @@ impl ExtensionHost {
 
     pub fn load_source(&mut self, source: &str, name: String) -> anyhow::Result<()> {
         let ext_index = self.extensions.len();
+        let caps = caps::parse_caps(source);
         let registered: Arc<Mutex<Vec<(String, String, rhai::Map)>>> =
             Arc::new(Mutex::new(Vec::new()));
         let registered_cmds: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let state: StateStore = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
-        let mut engine = build_engine(&state);
+        let mut engine = build_engine(&state, &caps);
 
         let registrations = Arc::clone(&registered);
         engine.register_fn(
@@ -413,8 +444,13 @@ impl ExtensionHost {
 
         let runner_opt = self.subagent_runner.lock().unwrap().clone();
         if let Some(runner) = runner_opt.clone() {
+            let sub_ok = caps::subagents_allowed(&caps);
             let r1 = Arc::clone(&runner);
             engine.register_fn("run_subagent", move |task: &str| -> String {
+                if !sub_ok {
+                    return "sub-agent error: denied by capability manifest (subagents: 0)"
+                        .to_string();
+                }
                 match r1(task.to_string(), None) {
                     Ok(answer) => answer,
                     Err(e) => format!("sub-agent error: {e}"),
@@ -422,6 +458,10 @@ impl ExtensionHost {
             });
             let runner2 = Arc::clone(&runner);
             engine.register_fn("run_subagent", move |task: &str, model: &str| -> String {
+                if !sub_ok {
+                    return "sub-agent error: denied by capability manifest (subagents: 0)"
+                        .to_string();
+                }
                 match runner2(task.to_string(), Some(model.to_string())) {
                     Ok(answer) => answer,
                     Err(e) => format!("sub-agent error: {e}"),
@@ -433,6 +473,10 @@ impl ExtensionHost {
             engine.register_fn(
                 "spawn_subagent",
                 move |task: &str, model: &str, tag: &str| -> String {
+                    if !sub_ok {
+                        return "denied: capability manifest forbids sub-agents (subagents: 0)"
+                            .to_string();
+                    }
                     let runner = Arc::clone(&spawn_runner);
                     let inbox = Arc::clone(&inbox);
                     let task = task.to_string();
@@ -503,6 +547,8 @@ impl ExtensionHost {
         if let Some(pm_runner) = runner_opt {
             let pm_ast = ast.clone();
             let pm_state = Arc::clone(&state);
+            let pm_caps = caps.clone();
+            let pm_sub_ok = caps::subagents_allowed(&caps);
             engine.register_fn(
                 "parallel_map",
                 move |items: rhai::Array,
@@ -510,6 +556,11 @@ impl ExtensionHost {
                       fn_name: &str,
                       model: &str|
                       -> rhai::Array {
+                    if !pm_sub_ok {
+                        return vec![Dynamic::from(
+                            "denied: capability manifest forbids sub-agents (subagents: 0)",
+                        )];
+                    }
                     parallel_map_impl(
                         pm_ast.clone(),
                         pm_state.clone(),
@@ -518,6 +569,7 @@ impl ExtensionHost {
                         concurrency.max(1) as usize,
                         fn_name,
                         model,
+                        pm_caps.clone(),
                     )
                 },
             );
@@ -563,6 +615,7 @@ impl ExtensionHost {
             engine,
             ast,
             scope,
+            caps,
             has_on_tool_call,
             has_on_tool_result,
             has_on_context,
@@ -823,6 +876,17 @@ impl ExtensionHost {
         }))
     }
 
+    /// Test hook: invoke one extension's function directly.
+    #[doc(hidden)]
+    pub fn call_extension_for_test(
+        &self,
+        ext_index: usize,
+        fn_name: &str,
+        args: impl rhai::FuncArgs + Send,
+    ) -> Result<Dynamic, String> {
+        self.call_extension(ext_index, fn_name, args)
+    }
+
     fn call_extension(
         &self,
         ext_index: usize,
@@ -945,8 +1009,8 @@ impl ExtensionHost {
     }
 }
 
-fn worker_engine(state: &StateStore, runner: &SubagentRunner) -> Engine {
-    let mut engine = build_engine(state);
+fn worker_engine(state: &StateStore, runner: &SubagentRunner, caps: &caps::Caps) -> Engine {
+    let mut engine = build_engine(state, caps);
     let r1 = runner.clone();
     engine.register_fn("run_subagent", move |task: &str| -> String {
         match r1(task.to_string(), None) {
@@ -972,6 +1036,7 @@ fn parallel_map_impl(
     concurrency: usize,
     fn_name: &str,
     model: &str,
+    caps: caps::Caps,
 ) -> rhai::Array {
     let mut results: Vec<Dynamic> = vec![Dynamic::UNIT; items.len()];
     let mut idx = 0usize;
@@ -984,6 +1049,7 @@ fn parallel_map_impl(
             let runner = runner.clone();
             let item = item.clone();
             let fn_name = fn_name.to_string();
+            let caps = caps.clone();
             let model = if model.is_empty() {
                 None
             } else {
@@ -998,7 +1064,7 @@ fn parallel_map_impl(
                             Err(e) => Dynamic::from(format!("sub-agent error: {e}")),
                         }
                     } else {
-                        let engine = worker_engine(&state, &runner);
+                        let engine = worker_engine(&state, &runner, &caps);
                         let mut scope = Scope::new();
                         match engine.call_fn::<Dynamic>(&mut scope, &ast, &fn_name, (item,)) {
                             Ok(d) => d,
@@ -1125,9 +1191,33 @@ fn prompt_trust(dir: &Path) -> TrustDecision {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         return TrustDecision::Deny;
     }
+    // Show what you're granting, not "full permissions y/N": each script's
+    // capability manifest (or its absence) is part of the prompt.
+    let mut caps_lines = String::new();
+    if let Ok(rd) = std::fs::read_dir(&canonical) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("rhai") {
+                continue;
+            }
+            if let Ok(src) = std::fs::read_to_string(&p) {
+                let c = caps::parse_caps(&src);
+                caps_lines.push_str(&format!(
+                    "  {}: {}\n",
+                    p.file_name().and_then(|f| f.to_str()).unwrap_or("?"),
+                    c.summary()
+                ));
+            }
+        }
+    }
     eprintln!(
-        "\nProject extensions found at {}\nThey run with your full permissions (tools, hooks, shell). Trust this directory? [y/N]",
-        canonical.display()
+        "\nProject extensions found at {}\n{}\nThey run with the permissions shown above (tools, hooks, shell). Trust this directory? [y/N]",
+        canonical.display(),
+        if caps_lines.is_empty() {
+            "  (no scripts found)\n".to_string()
+        } else {
+            caps_lines
+        }
     );
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {

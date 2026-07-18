@@ -1,0 +1,180 @@
+//! Capability manifests. A pack declares caps in a leading comment line:
+//!   // caps: {"exec": ["git"], "fs": [".pirs/**"], "subagents": 2}
+//! and the host enforces them at the host-function boundary. Absent caps key
+//! = unrestricted for that dimension (backward compatible); present = deny
+//! everything not listed. `subagents: 0` denies sub-agents entirely.
+
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Caps {
+    #[serde(default)]
+    pub fs: Option<Vec<String>>,
+    #[serde(default)]
+    pub exec: Option<Vec<String>>,
+    #[serde(default)]
+    pub subagents: Option<i64>,
+}
+
+impl Caps {
+    pub fn is_restricted(&self) -> bool {
+        self.fs.is_some() || self.exec.is_some() || self.subagents.is_some()
+    }
+
+    /// Human-readable summary for the trust prompt.
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(fs) = &self.fs {
+            parts.push(format!("fs=[{}]", fs.join(", ")));
+        }
+        if let Some(exec) = &self.exec {
+            parts.push(format!("exec=[{}]", exec.join(", ")));
+        }
+        if let Some(n) = self.subagents {
+            parts.push(format!("subagents={n}"));
+        }
+        if parts.is_empty() {
+            "no capability manifest — full permissions".to_string()
+        } else {
+            format!("declares capabilities: {}", parts.join(" "))
+        }
+    }
+}
+
+/// Parse the caps manifest from a script's leading comment lines. Stops at
+/// the first non-comment, non-blank line.
+pub fn parse_caps(source: &str) -> Caps {
+    for line in source.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some(comment) = line.strip_prefix("//") else {
+            break;
+        };
+        let comment = comment.trim();
+        if let Some(json) = comment.strip_prefix("caps:") {
+            return serde_json::from_str(json.trim()).unwrap_or_default();
+        }
+    }
+    Caps::default()
+}
+
+/// Shell metacharacters rejected when an exec allowlist is in force: with
+/// these, `exec: ["git"]` would still grant everything (`git ...; rm -rf`).
+const EXEC_METACHARS: &[&str] = &["|", ";", "&", ">", "<", "`", "$(", "\n", "\\"];
+
+/// Check a command against the exec capability. Returns Err(reason) when
+/// blocked; the reason is shown to the model.
+pub fn check_exec(caps: &Caps, command: &str) -> Result<(), String> {
+    let Some(allow) = &caps.exec else {
+        return Ok(());
+    };
+    for m in EXEC_METACHARS {
+        if command.contains(m) {
+            return Err(format!(
+                "blocked by capability manifest: shell metacharacter {m:?} not allowed with exec caps"
+            ));
+        }
+    }
+    let first = command.split_whitespace().next().unwrap_or("");
+    let base = first.rsplit('/').next().unwrap_or(first);
+    if allow.iter().any(|a| a == base || a == first) {
+        Ok(())
+    } else {
+        Err(format!(
+            "blocked by capability manifest: {base:?} not in exec allowlist [{}]",
+            allow.join(", ")
+        ))
+    }
+}
+
+/// Check a path against the fs capability. Patterns: exact match,
+/// `dir/**` (prefix), `*.ext` (suffix). Paths are compared as strings after
+/// normalizing `./`.
+pub fn check_fs(caps: &Caps, path: &str) -> bool {
+    let Some(patterns) = &caps.fs else {
+        return true;
+    };
+    let norm = path.strip_prefix("./").unwrap_or(path);
+    patterns.iter().any(|p| {
+        let p = p.strip_prefix("./").unwrap_or(p);
+        if let Some(prefix) = p.strip_suffix("/**") {
+            norm == prefix || norm.starts_with(&format!("{prefix}/"))
+        } else if let Some(suffix) = p.strip_prefix('*') {
+            norm.ends_with(suffix)
+        } else {
+            norm == p
+        }
+    })
+}
+
+/// subagents: 0 denies; any positive value allows (concurrency caps are not
+/// enforced yet — this is a boolean gate).
+pub fn subagents_allowed(caps: &Caps) -> bool {
+    caps.subagents.map(|n| n > 0).unwrap_or(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_manifest_from_leading_comment() {
+        let src = "// caps: {\"exec\": [\"git\"], \"fs\": [\"./.pirs/**\"], \"subagents\": 2}\nfn f() { 1 }\n";
+        let caps = parse_caps(src);
+        assert_eq!(caps.exec.as_deref(), Some(&["git".to_string()][..]));
+        assert_eq!(caps.subagents, Some(2));
+        assert!(caps.is_restricted());
+
+        // No manifest = unrestricted.
+        let none = parse_caps("fn f() { 1 }\n");
+        assert!(!none.is_restricted());
+        assert!(none.summary().contains("full permissions"));
+    }
+
+    #[test]
+    fn exec_allowlist_blocks_metachars_and_unknown_bins() {
+        let caps = Caps {
+            exec: Some(vec!["git".into()]),
+            ..Default::default()
+        };
+        assert!(check_exec(&caps, "git status").is_ok());
+        assert!(check_exec(&caps, "git log --oneline").is_ok());
+        assert!(check_exec(&caps, "git status && rm -rf /").is_err());
+        assert!(check_exec(&caps, "git status > /tmp/x").is_err());
+        assert!(check_exec(&caps, "echo $(whoami)").is_err());
+        assert!(check_exec(&caps, "rm -rf /").is_err());
+        assert!(check_exec(&caps, "/usr/bin/git status").is_ok());
+
+        // No manifest: anything goes.
+        assert!(check_exec(&Caps::default(), "rm -rf / | cat").is_ok());
+    }
+
+    #[test]
+    fn fs_globs() {
+        let caps = Caps {
+            fs: Some(vec![".pirs/**".into(), "*.rhai".into(), "exact.txt".into()]),
+            ..Default::default()
+        };
+        assert!(check_fs(&caps, ".pirs/notes/a.md"));
+        assert!(check_fs(&caps, "./.pirs/x"));
+        assert!(!check_fs(&caps, "src/main.rs"));
+        assert!(check_fs(&caps, "pack.rhai"));
+        assert!(check_fs(&caps, "exact.txt"));
+        assert!(check_fs(&Caps::default(), "/etc/passwd"));
+    }
+
+    #[test]
+    fn subagents_gate() {
+        assert!(!subagents_allowed(&Caps {
+            subagents: Some(0),
+            ..Default::default()
+        }));
+        assert!(subagents_allowed(&Caps {
+            subagents: Some(2),
+            ..Default::default()
+        }));
+        assert!(subagents_allowed(&Caps::default()));
+    }
+}
