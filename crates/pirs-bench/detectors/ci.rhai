@@ -38,6 +38,37 @@ fn gather_ci() {
     hay
 }
 
+// True when a mined `pip install ...` command only touches the packaging
+// toolchain itself (pip/setuptools/wheel), with no project-specific target —
+// e.g. `pip install -U pip setuptools`. CI recipes throwaway-upgrade these in
+// an ephemeral runner; replaying that against SWE-bench's pre-provisioned,
+// version-pinned conda env can break already-working imports (a newer
+// setuptools can drop `pkg_resources`, breaking collection for anything that
+// still imports it) — a regression, not a fix, so this must never be mined.
+fn is_toolchain_only_upgrade(cmd) {
+    let low = cmd.to_lower();
+    let rest = "";
+    if low.starts_with("pip install") {
+        rest = cmd.sub_string(11);
+    } else if low.starts_with("pip3 install") {
+        rest = cmd.sub_string(12);
+    } else {
+        return false;
+    }
+
+    let saw_token = false;
+    for tok in rest.split(' ') {
+        if tok == "" { continue; }
+        if tok.starts_with("-") { continue; } // flags: -U, --upgrade, ...
+        let low_tok = tok.to_lower();
+        if low_tok != "pip" && low_tok != "setuptools" && low_tok != "wheel" {
+            return false; // a real project/package target — trust it
+        }
+        saw_token = true;
+    }
+    saw_token
+}
+
 // Pull a single `pip install ...` command out of one CI line, stripped of YAML
 // step noise and truncated at the first shell chain delimiter. "" if none.
 fn extract_pip(line) {
@@ -75,7 +106,7 @@ fn detect() {
     let installs = [];
     for line in hay.split('\n') {
         let cmd = extract_pip(line);
-        if cmd != "" {
+        if cmd != "" && !is_toolchain_only_upgrade(cmd) {
             let dup = false;
             for existing in installs { if existing == cmd { dup = true; } }
             if !dup { installs.push(cmd + " 2>/dev/null || true"); }
@@ -94,6 +125,8 @@ fn detect() {
         install: installs,
         list_cmd: py + "\"$PY\" -m pytest --collect-only -q 2>/dev/null | head -n 5",
         test_cmd: py + "\"$PY\" -m pytest {tests} --junitxml={junit} -p no:cacheprovider -q",
+        // Same bare-shell-word {tests} as pytest.rhai — same escaping need.
+        shell_quote_tests: true,
         timeout_secs: 1200,
         parallel: false,
     });

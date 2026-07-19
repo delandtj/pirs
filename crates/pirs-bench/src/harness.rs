@@ -15,11 +15,12 @@ use std::path::PathBuf;
 use crate::bootstrap::{bootstrap, Bootstrap};
 use crate::cache::BaselineCache;
 use crate::command::CommandRunner;
-use crate::detect::{discover, DetectorHost, Discovery};
+use crate::detect::DetectorHost;
 use crate::driver::{run_task, run_task_cached, Executor, TaskSpec};
 use crate::git::GitWorkspace;
+use crate::probe::probe;
 use crate::timing::Timings;
-use crate::types::{FailBucket, Outcome, TestId};
+use crate::types::{FailBucket, Outcome, RunnerSpec, TestId};
 
 /// A single benchmark instance to attempt.
 pub struct Instance {
@@ -64,27 +65,50 @@ pub fn run_instance(
         })
     };
 
-    // 1. Discover and probe-confirm a runner. No confirmed runner → we can't get
-    //    a pass/fail signal at all. (No edits yet, so no rollback needed.)
-    let discovered = timings.time("discover", || discover(host, &inst.repo_root))?;
-    let spec = match discovered {
-        Discovery::Confirmed { spec, .. } => spec,
-        Discovery::Unconfirmed { tried, hint } => {
-            tracing::warn!("no runner confirmed ({tried} tried): {hint}");
-            return bail(Outcome::Failed(FailBucket::RunnerUndetected), timings);
+    // 1. Discover every runner candidate whose probe confirms (read-only, no
+    //    installs yet), in trust order. No confirmed candidate → we can't get a
+    //    pass/fail signal at all. (No edits yet, so no rollback needed.)
+    let confirmed: Vec<RunnerSpec> = timings.time("discover", || -> anyhow::Result<_> {
+        let mut out = Vec::new();
+        for candidate in host.detect(&inst.repo_root) {
+            if probe(&candidate, &inst.repo_root)?.confirmed {
+                out.push(candidate);
+            }
         }
-    };
+        Ok(out)
+    })?;
+    if confirmed.is_empty() {
+        tracing::warn!("no runner confirmed");
+        return bail(Outcome::Failed(FailBucket::RunnerUndetected), timings);
+    }
 
-    // 2. Make the environment usable (install + re-probe). A broken env is a
-    //    distinct failure from an undetected runner.
-    let boot = timings.time("bootstrap", || bootstrap(&spec, &inst.repo_root))?;
-    match boot {
-        Bootstrap::Ready(_) => {}
-        Bootstrap::Failed(hint) => {
-            tracing::warn!("environment setup failed: {hint}");
+    // 2. Make the environment usable (install + re-probe), trying confirmed
+    //    candidates in trust order. A higher-trust candidate's own install can
+    //    break an environment that was already probing fine (e.g. a CI-mined
+    //    command that blindly upgrades pip/setuptools against a
+    //    pre-provisioned venv) — that must degrade to the next candidate, not
+    //    fail the whole instance outright.
+    let mut spec = None;
+    let mut last_hint = String::new();
+    timings.time("bootstrap", || -> anyhow::Result<()> {
+        for candidate in confirmed {
+            match bootstrap(&candidate, &inst.repo_root)? {
+                Bootstrap::Ready(_) => {
+                    spec = Some(candidate);
+                    break;
+                }
+                Bootstrap::Failed(hint) => last_hint = hint,
+            }
+        }
+        Ok(())
+    })?;
+    let spec = match spec {
+        Some(s) => s,
+        None => {
+            tracing::warn!("environment setup failed for every candidate runner: {last_hint}");
             return bail(Outcome::Failed(FailBucket::EnvSetup), timings);
         }
-    }
+    };
 
     // 3. Build the concrete runner and drive the task. The executor edits the
     //    real tree; the outcome decides whether we keep or discard those edits.

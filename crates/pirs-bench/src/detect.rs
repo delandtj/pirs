@@ -309,6 +309,44 @@ mod tests {
     }
 
     #[test]
+    fn ci_oracle_drops_toolchain_self_upgrade_but_keeps_real_install() {
+        // Regression test: mined from a real SWE-bench sphinx CircleCI config.
+        // `pip install -U pip setuptools` upgrades the packaging toolchain
+        // itself against a pre-provisioned, version-pinned conda env — on this
+        // real instance it silently broke `pkg_resources` and made every test
+        // uncollectable. That must never be mined; the real project install
+        // right after it (`.[test]`) must still come through untouched.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname='x'\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".circleci")).unwrap();
+        std::fs::write(
+            dir.path().join(".circleci/config.yml"),
+            "jobs:\n  test:\n    steps:\n\
+             \x20     - run: /python3.6/bin/pip install -U pip setuptools\n\
+             \x20     - run: /python3.6/bin/pip install -U .[test]\n\
+             \x20     - run: pytest -q\n",
+        )
+        .unwrap();
+        let host = DetectorHost::with_bundled().unwrap();
+        let specs = host.detect(dir.path());
+        let ci = specs
+            .iter()
+            .find(|s| s.framework == "pytest-ci")
+            .expect("pytest-ci spec");
+
+        assert!(
+            !ci.install.iter().any(|c| c.contains("setuptools")),
+            "toolchain self-upgrade must be dropped: {:?}",
+            ci.install
+        );
+        assert!(
+            ci.install.iter().any(|c| c.contains(".[test]")),
+            "the real project install must survive: {:?}",
+            ci.install
+        );
+    }
+
+    #[test]
     fn ci_oracle_silent_without_pytest_in_ci() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
