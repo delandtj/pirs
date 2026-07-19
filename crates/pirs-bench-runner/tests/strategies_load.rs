@@ -28,7 +28,10 @@ fn every_shipped_strategy_script_loads() {
         );
         loaded += 1;
     }
-    assert!(loaded >= 3, "expected at least 3 example scripts, saw {loaded}");
+    assert!(
+        loaded >= 3,
+        "expected at least 3 example scripts, saw {loaded}"
+    );
 }
 
 #[test]
