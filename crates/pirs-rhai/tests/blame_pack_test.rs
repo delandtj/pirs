@@ -66,14 +66,39 @@ fn blame_pack_notes_moved_head() {
     let note1b = git(repo, &["notes", "show", &head1]);
     assert!(note1b.contains("pirs-turn=1"), "{note1b}");
 
-    // Agent commits -> next turn_end annotates the NEW head with turn 3.
+    // Agent makes TWO commits in one turn -> next turn_end annotates BOTH,
+    // not just the final HEAD, each with turn 3.
     std::fs::write(repo.join("f.txt"), "one\ntwo\n").unwrap();
     git(repo, &["add", "f.txt"]);
     git(repo, &["commit", "-qm", "c2"]);
+    let mid = git(repo, &["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("f.txt"), "one\ntwo\nthree\n").unwrap();
+    git(repo, &["add", "f.txt"]);
+    git(repo, &["commit", "-qm", "c3"]);
     turn_end();
     let head2 = git(repo, &["rev-parse", "HEAD"]);
-    let note2 = git(repo, &["notes", "show", &head2]);
-    assert!(note2.contains("pirs-turn=3"), "{note2}");
+    let note_head = git(repo, &["notes", "show", &head2]);
+    let note_mid = git(repo, &["notes", "show", &mid]);
+    assert!(note_head.contains("pirs-turn=3"), "head: {note_head}");
+    assert!(
+        note_mid.contains("pirs-turn=3"),
+        "intermediate commit was not annotated: {note_mid}"
+    );
+
+    // notes.rewriteRef was configured, so provenance survives a rebase that
+    // rewrites the commit. Amend head2 and confirm the note carried over.
+    assert_eq!(
+        git(repo, &["config", "notes.rewriteRef"]),
+        "refs/notes/commits"
+    );
+    git(repo, &["commit", "--amend", "-qm", "c3-amended"]);
+    let head3 = git(repo, &["rev-parse", "HEAD"]);
+    assert_ne!(head3, head2, "amend should rewrite the commit");
+    let note_amended = git(repo, &["notes", "show", &head3]);
+    assert!(
+        note_amended.contains("pirs-turn=3"),
+        "note did not survive the rewrite: {note_amended}"
+    );
 
     pirs_rhai::set_session_meta("", "");
     std::env::set_current_dir(prev_cwd).unwrap();
