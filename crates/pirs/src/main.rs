@@ -144,6 +144,12 @@ struct Cli {
     #[arg(long, env = "PIRS_EMBED_MAX_CHARS")]
     embed_max_chars: Option<usize>,
 
+    /// Max symbols code_search embeds per call (default 256). Keeps a first
+    /// search from blocking on a full cold index; raise it to index everything
+    /// in one pass with a fast model [env: PIRS_EMBED_BATCH_CAP]
+    #[arg(long, env = "PIRS_EMBED_BATCH_CAP")]
+    embed_batch_cap: Option<usize>,
+
     /// Start with only core tools loaded; model loads more via use_tool
     #[arg(long)]
     tool_diet: bool,
@@ -610,34 +616,42 @@ async fn main() -> anyhow::Result<()> {
         sub_tools.push(map_tool);
         sub_tools.push(ast_tool);
 
-        if cli.semantic {
+        // The optional semantic arm of code_search. BM25 + graph work with no
+        // model; embeddings are added only when --semantic supplies one.
+        let embedder = if cli.semantic {
             match cli.embed_model.clone() {
                 Some(model) => {
                     let base = cli
                         .embed_base_url
                         .clone()
                         .unwrap_or_else(|| "http://localhost:11434/v1".to_string());
-                    let embedder =
-                        pirs_ai::EmbeddingClient::new(base, model, cli.embed_api_key.clone());
-                    let sem =
-                        std::sync::Arc::new(pirs_graph::semantic_search::SemanticSearchTool::new(
-                            std::sync::Arc::clone(g),
-                            cwd.clone(),
-                            graph_db.clone(),
-                            embedder,
-                            cli.embed_max_chars,
-                        ));
-                    tools.push(sem.clone());
-                    sub_tools.push(sem);
+                    Some(pirs_ai::EmbeddingClient::new(
+                        base,
+                        model,
+                        cli.embed_api_key.clone(),
+                    ))
                 }
                 None => {
                     eprintln!(
                         "warning: --semantic requires --embed-model (or PIRS_EMBED_MODEL); \
-                         semantic_search tool not loaded"
+                         code_search will run lexical+graph only"
                     );
+                    None
                 }
             }
-        }
+        } else {
+            None
+        };
+        let code_search = std::sync::Arc::new(pirs_graph::code_search::CodeSearchTool::new(
+            std::sync::Arc::clone(g),
+            cwd.clone(),
+            graph_db.clone(),
+            embedder,
+            cli.embed_max_chars,
+            cli.embed_batch_cap,
+        ));
+        tools.push(code_search.clone());
+        sub_tools.push(code_search);
     }
     {
         let manifests = [

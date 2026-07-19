@@ -1,10 +1,11 @@
 pub mod ast_edit;
 pub mod code_map;
+pub mod code_search;
 pub mod graph;
 pub mod lexical;
-pub mod semantic_search;
 pub mod store;
 
+pub use code_search::CodeSearchTool;
 pub use graph::{Graph, Lang, SymKind, Symbol};
 pub use store::{full_graph, GraphStore};
 

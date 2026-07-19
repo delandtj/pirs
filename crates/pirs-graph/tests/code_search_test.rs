@@ -1,9 +1,11 @@
 //! The resilience fix caught by live testing: a small-context embedding model
-//! rejects a dense chunk that exceeds its token limit. Indexing must survive by
-//! truncating the offender per-item rather than aborting the whole batch.
+//! rejects a dense chunk that exceeds its token limit. The semantic arm of
+//! `code_search` must survive by truncating the offender per-item rather than
+//! aborting the whole batch — and the tool must always return BM25 results even
+//! when the embedding service misbehaves.
 //!
-//! Drives the real `SemanticSearchTool` against a mock `/v1/embeddings` server
-//! that returns HTTP 400 for any single input longer than a fixed char limit —
+//! Drives the real `CodeSearchTool` against a mock `/v1/embeddings` server that
+//! returns HTTP 400 for any single input longer than a fixed char limit —
 //! exactly how Ollama/all-minilm behaves on an over-long chunk.
 
 use std::io::{Read, Write};
@@ -12,7 +14,7 @@ use std::sync::Arc;
 
 use pirs_agent::{AgentTool, ToolExecContext};
 use pirs_ai::EmbeddingClient;
-use pirs_graph::semantic_search::SemanticSearchTool;
+use pirs_graph::code_search::CodeSearchTool;
 use pirs_graph::LazyGraph;
 
 /// A mock embeddings server: for each string in `input`, return a 4-dim vector
@@ -75,7 +77,7 @@ fn write(root: &std::path::Path, rel: &str, body: &str) {
 }
 
 #[tokio::test]
-async fn oversized_chunk_is_truncated_not_fatal() {
+async fn oversized_chunk_survives_and_semantic_arm_activates() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
 
@@ -96,7 +98,14 @@ async fn oversized_chunk_is_truncated_not_fatal() {
 
     let db = root.join(".pirs/graph.db");
     let graph = Arc::new(LazyGraph::persistent(root.clone(), db.clone()));
-    let tool = SemanticSearchTool::new(graph, root.clone(), db, embedder, Some(2000));
+    let tool = CodeSearchTool::new(
+        graph,
+        root.clone(),
+        db,
+        Some(embedder),
+        Some(2000),
+        Some(256),
+    );
 
     let ctx = ToolExecContext {
         tool_call_id: "t1".into(),
@@ -107,18 +116,59 @@ async fn oversized_chunk_is_truncated_not_fatal() {
     let out = tool.execute(ctx).await.expect("tool must not error out");
     let text = serde_json::to_string(&out.content).unwrap();
 
-    // The run survived and produced ranked results (not the failure note).
+    // BM25 always finds the lexical match, regardless of the embedding service.
     assert!(
         text.contains("Top ") && text.contains("tiny"),
         "expected ranked hits including the small symbol, got: {text}"
     );
+    // The semantic arm activated: both symbols embedded (huge one via truncation),
+    // so the fused result reports semantic participation rather than degrading.
     assert!(
-        !text.to_lowercase().contains("unavailable") && !text.contains("indexing failed"),
-        "must not degrade to the failure path: {text}"
+        text.contains("semantic"),
+        "semantic arm should be active after both symbols embedded: {text}"
     );
-    // Both symbols got embedded — the oversized one via truncation.
+}
+
+#[tokio::test]
+async fn embedding_service_down_falls_back_to_lexical() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    write(
+        &root,
+        "auth.rs",
+        "fn authenticate_token(t: String) -> bool { true }\n",
+    );
+
+    // Point at a dead port: every embed call fails, so the semantic arm is inert.
+    let embedder = EmbeddingClient::new("http://127.0.0.1:1/v1".to_string(), "dead", None);
+    let db = root.join(".pirs/graph.db");
+    let graph = Arc::new(LazyGraph::persistent(root.clone(), db.clone()));
+    let tool = CodeSearchTool::new(
+        graph,
+        root.clone(),
+        db,
+        Some(embedder),
+        Some(2000),
+        Some(64),
+    );
+
+    let ctx = ToolExecContext {
+        tool_call_id: "t1".into(),
+        args: serde_json::json!({ "query": "authenticate_token", "limit": 5 }),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        on_update: None,
+    };
+    let out = tool
+        .execute(ctx)
+        .await
+        .expect("must not error when service down");
+    let text = serde_json::to_string(&out.content).unwrap();
     assert!(
-        text.contains("embedded 2 new symbols"),
-        "both symbols embedded (huge one truncated to fit): {text}"
+        text.contains("authenticate_token"),
+        "lexical result survives a dead embedding service: {text}"
+    );
+    assert!(
+        text.contains("semantic index empty") || text.contains("lexical+graph"),
+        "should report lexical-only fallback: {text}"
     );
 }
