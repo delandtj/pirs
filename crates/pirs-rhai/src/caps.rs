@@ -33,12 +33,52 @@ impl Caps {
         if let Some(n) = self.subagents {
             parts.push(format!("subagents={n}"));
         }
-        if parts.is_empty() {
+        let base = if parts.is_empty() {
             "no capability manifest — full permissions".to_string()
         } else {
             format!("declares capabilities: {}", parts.join(" "))
+        };
+        // Surface exec grants that are effectively arbitrary code execution.
+        // The allowlist + metachar block can't narrow these — git runs code
+        // via `-c core.pager`/aliases, cargo via build scripts, interpreters
+        // directly — so we say so plainly instead of implying a tight grant.
+        let coarse = coarse_exec_grants(self);
+        if coarse.is_empty() {
+            base
+        } else {
+            format!(
+                "{base}  ⚠ exec=[{}] can run arbitrary code (flags/subcommands/build scripts) — treat as full shell access",
+                coarse.join(", ")
+            )
         }
     }
+}
+
+/// Binaries whose own flags, subcommands, or build hooks execute arbitrary
+/// code, so an `exec` grant for them is inherently full code execution — the
+/// allowlist and shell-metachar block cannot narrow it. Used to warn the user
+/// at trust time rather than pretend the grant is scoped.
+pub const SHELL_CAPABLE_BINARIES: &[&str] = &[
+    "git", "cargo", "make", "cmake", "npm", "npx", "yarn", "pnpm", "node",
+    "deno", "bun", "python", "python2", "python3", "ruby", "perl", "php", "lua",
+    "sh", "bash", "zsh", "fish", "dash", "env", "xargs", "find", "sed", "awk",
+    "docker", "podman", "ssh", "scp", "rsync", "gcc", "g++", "cc", "clang",
+    "rustc", "go", "vim", "nvim", "emacs", "gdb", "lldb", "systemctl",
+];
+
+/// The subset of a pack's exec allowlist that grants effectively unrestricted
+/// code execution (see `SHELL_CAPABLE_BINARIES`).
+pub fn coarse_exec_grants(caps: &Caps) -> Vec<String> {
+    let Some(exec) = &caps.exec else {
+        return Vec::new();
+    };
+    exec.iter()
+        .filter(|b| {
+            let base = b.rsplit('/').next().unwrap_or(b);
+            SHELL_CAPABLE_BINARIES.contains(&base)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Parse the caps manifest from a script's leading comment lines. Stops at
@@ -168,6 +208,35 @@ mod tests {
         // A suffix rule must not authorize an absolute write just because the
         // extension matches.
         assert!(!check_fs(&caps, "/etc/cron.d/evil.log"));
+    }
+
+    #[test]
+    fn coarse_exec_grants_are_surfaced_in_summary() {
+        // git can exec arbitrary code via `-c core.pager`/aliases; the
+        // allowlist can't narrow it, so the trust prompt must say so.
+        let git = Caps {
+            exec: Some(vec!["git".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(coarse_exec_grants(&git), vec!["git".to_string()]);
+        let s = git.summary();
+        assert!(s.contains("arbitrary code"), "{s}");
+        assert!(s.contains("full shell access"), "{s}");
+
+        // A path-qualified binary is matched by its base name.
+        let qualified = Caps {
+            exec: Some(vec!["/usr/bin/bash".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(coarse_exec_grants(&qualified), vec!["/usr/bin/bash".to_string()]);
+
+        // A narrow, non-shell tool is NOT flagged — no false alarm.
+        let narrow = Caps {
+            exec: Some(vec!["rg".to_string(), "jq".to_string()]),
+            ..Default::default()
+        };
+        assert!(coarse_exec_grants(&narrow).is_empty());
+        assert!(!narrow.summary().contains("arbitrary code"), "{}", narrow.summary());
     }
 
     #[test]
