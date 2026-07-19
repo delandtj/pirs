@@ -97,6 +97,11 @@ pub async fn run(mut opts: ServeOptions) -> anyhow::Result<()> {
             opts.bind
         );
     }
+    // Embedding the token in GET / hands it to any local user who can reach the
+    // loopback socket -> local RCE on a shared host. Off by default; opt in on a
+    // trusted single-user machine. Otherwise the page prompts for the token
+    // (printed to this terminal) and caches it in localStorage.
+    let embed_token = loopback && env_flag("PIRS_SERVE_EMBED_TOKEN");
     let addr = format!("{}:{}", opts.bind, opts.port);
     let listener = TcpListener::bind(&addr)
         .await
@@ -110,7 +115,7 @@ pub async fn run(mut opts: ServeOptions) -> anyhow::Result<()> {
             prompts: prompt_tx.clone(),
             agent: Arc::clone(&agent),
             token: opts.token.clone(),
-            embed_token: loopback,
+            embed_token,
         };
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, state).await {
@@ -129,6 +134,12 @@ struct AppState {
     /// Embed the auth token in the served page. Only safe when loopback-bound;
     /// on external binds the page must prompt for the token instead.
     embed_token: bool,
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// Compare an Authorization header value against the expected token. The
@@ -287,6 +298,10 @@ where
             respond(&mut write, 200, "application/json", "{\"ok\":true}").await?;
         }
         ("GET", "/state") => {
+            if !bearer_matches(&authorization, &state.token) {
+                respond(&mut write, 403, "text/plain", "missing or invalid bearer token").await?;
+                return Ok(());
+            }
             let body = {
                 let a = state.agent.lock().await;
                 let report = a.usage_report();

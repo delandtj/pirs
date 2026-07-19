@@ -955,10 +955,19 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if cli.serve {
-        let token = cli
-            .serve_token
-            .clone()
-            .unwrap_or_else(|| format!("pirs-{}", pirs_ai::now_millis()));
+        let loopback = matches!(cli.bind.as_str(), "127.0.0.1" | "localhost" | "::1");
+        let token = match cli.serve_token.clone() {
+            Some(t) => t,
+            None => {
+                if !loopback {
+                    anyhow::bail!(
+                        "--serve-token (or PIRS_SERVE_TOKEN) is required for a non-loopback bind ({})",
+                        cli.bind
+                    );
+                }
+                generate_serve_token()
+            }
+        };
         eprintln!("[serve token: {token}]");
         return serve::run(serve::ServeOptions {
             agent,
@@ -1303,9 +1312,31 @@ async fn handle_command(
     Ok(false)
 }
 
+/// A 256-bit random bearer token, hex-encoded. Never derive serve auth from a
+/// clock: a timestamp token is brute-forceable from the process start time.
+fn generate_serve_token() -> String {
+    let mut buf = [0u8; 32];
+    getrandom::getrandom(&mut buf).expect("getrandom failed to produce a serve token");
+    let mut s = String::with_capacity(64);
+    for b in buf {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serve_token_is_random_and_long() {
+        let a = generate_serve_token();
+        let b = generate_serve_token();
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b, "tokens must not be predictable/repeating");
+    }
     use std::sync::Arc;
 
     fn gate() -> Option<pirs_agent::events::BeforeToolCallHook> {
