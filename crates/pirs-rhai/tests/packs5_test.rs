@@ -7,10 +7,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 type Runner = Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>;
 
 fn load(name: &str, runner: Option<Runner>) -> Arc<ExtensionHost> {
-    let path = format!(
-        "{}/../../examples/extensions/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = format!("{}/../../extensions/{name}", env!("CARGO_MANIFEST_DIR"));
     let mut host = ExtensionHost::new();
     if let Some(r) = runner {
         host.set_subagent_runner(r);

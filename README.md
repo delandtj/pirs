@@ -22,7 +22,7 @@ export OPENAI_API_KEY=...            # or --api-key; OPENAI_BASE_URL for compati
 
 REPL commands: `/model`, `/export`, `/compact`, `/help`, `/quit`; `!cmd` runs a local command and records it in context (`!!cmd` skips recording). Type while the agent is working to steer it. Sessions persist as JSONL under `~/.pirs/sessions/` (`--resume`).
 
-Hardening flags: `--tool-diet` (start with core tools only; the model loads more via `use_tool`), `--sequential` (one tool call at a time), `--no-compaction` / `--context-window N`, `--max-retries N` (also retries empty/garbage completions). A `delegate` tool runs subtasks in fresh-context sub-agents — with an optional `model` override, this gives strong-planner/weak-executor routing in one process (sub-agents see no parent history, return only their answer). The orchestrator's `spawn --env KEY=VAL` (repeatable) configures per-instance providers/models for mixed fleets. and auto-compaction summarizes old history when the context window fills. `examples/extensions/weak-model.rhai` adds loop-detection, verify-after-edit, and plan pinning as a script pack.
+Hardening flags: `--tool-diet` (start with core tools only; the model loads more via `use_tool`), `--sequential` (one tool call at a time), `--no-compaction` / `--context-window N`, `--max-retries N` (also retries empty/garbage completions). A `delegate` tool runs subtasks in fresh-context sub-agents — with an optional `model` override, this gives strong-planner/weak-executor routing in one process (sub-agents see no parent history, return only their answer). The orchestrator's `spawn --env KEY=VAL` (repeatable) configures per-instance providers/models for mixed fleets. and auto-compaction summarizes old history when the context window fills. `extensions/weak-model.rhai` adds loop-detection, verify-after-edit, and plan pinning as a script pack.
 
 ## Extensions (rhai)
 
@@ -49,7 +49,7 @@ fn on_tool_call(id, name, args) {
 
 Loop hooks: `on_context(messages)`, `on_should_stop(info)`, `on_steering()`, `on_follow_up()`, `on_event(type, data)` (events carry token usage). State per extension via `state_get`/`state_set`; shell out via `exec(cmd, timeout_secs)`; file append/read via `fs_append`/`fs_read`; register slash commands via `register_command(name, desc)` + `fn cmd_<name>(args)` — dispatched by the REPL.
 
-Shipped packs in `examples/extensions/`:
+Shipped packs in `extensions/`:
 
 | Pack | Purpose |
 |---|---|

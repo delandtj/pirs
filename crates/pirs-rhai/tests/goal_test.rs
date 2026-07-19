@@ -3,10 +3,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 fn host() -> Arc<ExtensionHost> {
-    let path = format!(
-        "{}/../../examples/extensions/goal.rhai",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = format!("{}/../../extensions/goal.rhai", env!("CARGO_MANIFEST_DIR"));
     let mut h = ExtensionHost::new();
     h.load_source(&std::fs::read_to_string(&path).unwrap(), path)
         .unwrap();

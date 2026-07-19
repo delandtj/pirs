@@ -12,7 +12,7 @@ fn load() -> Arc<ExtensionHost> {
         }
     });
     let path = format!(
-        "{}/../../examples/extensions/mutation-guard.rhai",
+        "{}/../../extensions/mutation-guard.rhai",
         env!("CARGO_MANIFEST_DIR")
     );
     let mut host = ExtensionHost::new();

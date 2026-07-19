@@ -4,10 +4,7 @@ use pirs_rhai::ExtensionHost;
 use serde_json::json;
 
 fn load(name: &str, with_runner: bool) -> Arc<ExtensionHost> {
-    let path = format!(
-        "{}/../../examples/extensions/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = format!("{}/../../extensions/{name}", env!("CARGO_MANIFEST_DIR"));
     let mut host = ExtensionHost::new();
     if with_runner {
         host.set_subagent_runner(Arc::new(|task: String, model: Option<String>| {

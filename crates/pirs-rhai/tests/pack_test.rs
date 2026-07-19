@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 const PACK: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/extensions/weak-model.rhai"
+    "/../../extensions/weak-model.rhai"
 );
 
 struct MockProvider {

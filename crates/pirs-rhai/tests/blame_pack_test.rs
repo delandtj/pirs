@@ -32,10 +32,7 @@ fn blame_pack_notes_moved_head() {
     std::env::set_current_dir(repo).unwrap();
     pirs_rhai::set_session_meta("sess-1", "qwen3-coder");
 
-    let path = format!(
-        "{}/../../examples/extensions/blame.rhai",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = format!("{}/../../extensions/blame.rhai", env!("CARGO_MANIFEST_DIR"));
     let mut host = ExtensionHost::new();
     host.load_source(&std::fs::read_to_string(&path).unwrap(), path)
         .unwrap();

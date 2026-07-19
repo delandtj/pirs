@@ -2,7 +2,7 @@
 fn example_extension_loads_and_state_fns_work() {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../examples/extensions/word_count.rhai"
+        "/../../extensions/word_count.rhai"
     ))
     .unwrap();
     let mut host = pirs_rhai::ExtensionHost::new();

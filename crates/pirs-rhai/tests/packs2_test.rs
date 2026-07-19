@@ -60,10 +60,7 @@ impl AgentTool for NamedTool {
 }
 
 fn load_pack(name: &str) -> Arc<ExtensionHost> {
-    let path = format!(
-        "{}/../../examples/extensions/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = format!("{}/../../extensions/{name}", env!("CARGO_MANIFEST_DIR"));
     let mut host = ExtensionHost::new();
     host.load_source(&std::fs::read_to_string(&path).unwrap(), path)
         .unwrap();

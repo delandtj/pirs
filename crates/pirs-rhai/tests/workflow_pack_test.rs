@@ -16,7 +16,7 @@ async fn workflow_fans_out_caches_and_merges() {
         }
     }));
     let path = format!(
-        "{}/../../examples/extensions/workflow.rhai",
+        "{}/../../extensions/workflow.rhai",
         env!("CARGO_MANIFEST_DIR")
     );
     host.load_source(&std::fs::read_to_string(&path).unwrap(), path)

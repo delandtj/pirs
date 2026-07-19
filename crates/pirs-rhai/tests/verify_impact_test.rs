@@ -11,7 +11,7 @@ fn load_pack() -> Arc<ExtensionHost> {
         }
     });
     let path = format!(
-        "{}/../../examples/extensions/verify-impact.rhai",
+        "{}/../../extensions/verify-impact.rhai",
         env!("CARGO_MANIFEST_DIR")
     );
     let mut host = ExtensionHost::new();

@@ -6,10 +6,7 @@ use serde_json::json;
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn load(name: &str, runner: Option<pirs_rhai::SubagentRunner>) -> Arc<ExtensionHost> {
-    let path = format!(
-        "{}/../../examples/extensions/{name}",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = format!("{}/../../extensions/{name}", env!("CARGO_MANIFEST_DIR"));
     let mut host = ExtensionHost::new();
     if let Some(r) = runner {
         host.set_subagent_runner(r);
