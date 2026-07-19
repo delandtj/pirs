@@ -237,6 +237,13 @@ struct BatchInstance {
 }
 
 fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+        )
+        .init();
+
     let cli = Cli::parse();
     let result = match cli.cmd {
         Command::Solve(a) => run_solve(a).map(|solved| u8::from(!solved)),
