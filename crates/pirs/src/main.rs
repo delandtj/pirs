@@ -359,6 +359,18 @@ async fn main() -> anyhow::Result<()> {
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let (project_cfg, user_cfg) = config_file::load_layers(&cwd);
+    // `base_url`/`approval` are security-relevant (redirect API traffic /
+    // disable the approval gate) so they are deliberately NEVER read from the
+    // project layer — a `git clone`d repo's own .pirs/config.toml must not be
+    // able to silently point requests at an attacker's endpoint or turn off
+    // approval prompts just by being checked out. model/provider are inert
+    // preferences and stay project-configurable. See config_file::FileConfig.
+    if project_cfg.base_url.is_some() || project_cfg.approval.is_some() {
+        eprintln!(
+            "[note: project .pirs/config.toml sets base_url/approval, which are user-config-only and were ignored]"
+        );
+    }
+    let project_cfg = config_file::restrict_project_layer(project_cfg);
     let (model, model_src) = config_file::resolve_str(
         &matches,
         "model",

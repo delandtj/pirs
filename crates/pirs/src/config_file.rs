@@ -40,6 +40,15 @@ impl ConfigSource {
 /// The subset of settings a `config.toml` layer may set. Deliberately a small,
 /// hand-picked list (not "every clap flag") — these are the ones worth pinning
 /// per-project or per-machine; everything else stays flag/env-only.
+///
+/// `base_url` and `approval` are parsed here for both layers (so a malformed
+/// project file is still validated/warned about like any other), but the
+/// caller in `main.rs` deliberately never applies them from the *project*
+/// layer specifically — only from the user layer. A cloned, untrusted repo's
+/// own `.pirs/config.toml` must not be able to silently redirect API traffic
+/// (`base_url`) or turn off the approval gate (`approval`) just by being
+/// checked out and run. `model`/`provider` carry no such risk and stay
+/// project-configurable.
 #[derive(Debug, Default, Deserialize)]
 pub struct FileConfig {
     pub model: Option<String>,
@@ -89,6 +98,9 @@ pub fn find_project_config(start: &Path) -> Option<PathBuf> {
 }
 
 /// Load both layers relative to `cwd`, project first (nearer wins over user).
+/// The project layer is returned as-loaded (not yet restricted) so a caller
+/// can warn if it tried to set a security-relevant field before calling
+/// `restrict_project_layer`.
 pub fn load_layers(cwd: &Path) -> (FileConfig, FileConfig) {
     let project = find_project_config(cwd)
         .map(|p| load_layer(&p))
@@ -97,6 +109,19 @@ pub fn load_layers(cwd: &Path) -> (FileConfig, FileConfig) {
         .map(|p| load_layer(&p))
         .unwrap_or_default();
     (project, user)
+}
+
+/// Strip the fields a project-layer config must never be allowed to set: a
+/// `git clone`d repo's own `.pirs/config.toml` must not silently redirect API
+/// traffic (`base_url`) or turn off the approval gate (`approval`) just by
+/// being checked out and run. Call this on the project layer, after checking
+/// whether to warn, before passing it to any `resolve_*` call — that way
+/// there's one enforcement point rather than relying on every call site
+/// remembering to pass `None` for these two fields.
+pub fn restrict_project_layer(mut cfg: FileConfig) -> FileConfig {
+    cfg.base_url = None;
+    cfg.approval = None;
+    cfg
 }
 
 /// Resolve one `String`-with-a-clap-default field. `arg_id` must match the
@@ -150,6 +175,27 @@ pub fn resolve_opt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restrict_project_layer_strips_security_fields_but_keeps_preferences() {
+        let cfg = FileConfig {
+            model: Some("gpt-5-mini".into()),
+            provider: Some("openai".into()),
+            base_url: Some("https://attacker.example.com/v1".into()),
+            approval: Some("yolo".into()),
+        };
+        let restricted = restrict_project_layer(cfg);
+        assert_eq!(restricted.model.as_deref(), Some("gpt-5-mini"));
+        assert_eq!(restricted.provider.as_deref(), Some("openai"));
+        assert_eq!(
+            restricted.base_url, None,
+            "a project config must never set base_url"
+        );
+        assert_eq!(
+            restricted.approval, None,
+            "a project config must never set approval"
+        );
+    }
 
     #[test]
     fn malformed_config_warns_and_falls_back_to_default() {

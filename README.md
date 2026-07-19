@@ -141,6 +141,12 @@ provider = "openai"
 approval = "ask"
 ```
 
+`base_url`/`approval` are security-relevant (redirect API traffic / disable
+the approval gate), so they are only ever read from the **user** layer
+(`~/.pirs/config.toml`) — a cloned repo's own project-level `.pirs/config.toml`
+cannot set them, just by being checked out and run. `model`/`provider` carry
+no such risk and stay project-configurable.
+
 ## Orchestrator
 
 Run fleets of headless agents (`pirs --mode rpc`, pi-compatible JSONL RPC):
