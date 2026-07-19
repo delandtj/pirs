@@ -23,6 +23,23 @@ struct BashArgs {
     auto_restart: Option<bool>,
 }
 
+/// Cap on retained stdout/stderr per stream. Output is tail-truncated for
+/// display anyway, so a runaway command (`yes`, `cat /dev/zero`) must not grow
+/// this buffer without bound and OOM the agent. When exceeded we keep the tail.
+const OUTPUT_CAP: usize = 8 * 1024 * 1024;
+
+/// Keep only the last `max` bytes of `s`, cutting on a UTF-8 char boundary.
+fn cap_tail(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut cut = s.len() - max;
+    while cut < s.len() && !s.is_char_boundary(cut) {
+        cut += 1;
+    }
+    s.replace_range(..cut, "");
+}
+
 /// Decide whether a bash call becomes a detached host job.
 ///
 /// `spawn_bash_job` always runs on the host, outside any Docker/SSH sandbox,
@@ -220,10 +237,11 @@ async fn run_command_raw(
                     Some((is_out, c)) => {
                         if is_out {
                             out.push_str(&c);
+                            cap_tail(&mut out, OUTPUT_CAP);
                         } else {
                             out_err.push_str(&c);
+                            cap_tail(&mut out_err, OUTPUT_CAP);
                         }
-                        out.push_str("");
                         if let Some(ctx) = ctx {
                             if last_update.elapsed() > Duration::from_millis(100) {
                                 last_update = Instant::now();
@@ -353,6 +371,17 @@ fn sanitize_id(id: &str) -> String {
 mod tests {
     use super::*;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn cap_tail_bounds_memory_and_keeps_tail() {
+        let mut s = "x".repeat(100);
+        cap_tail(&mut s, 10);
+        assert_eq!(s.len(), 10);
+        // multibyte-safe: never panics on a char boundary
+        let mut m = "é".repeat(100); // 2 bytes each
+        cap_tail(&mut m, 11);
+        assert!(m.len() <= 12 && m.is_char_boundary(0));
+    }
 
     #[test]
     fn daemon_heuristic_never_backgrounds_under_sandbox() {
