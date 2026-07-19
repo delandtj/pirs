@@ -80,6 +80,7 @@ Shipped packs in `extensions/`:
 | `rollback.rhai` | commit-tree snapshots per turn, /undo N rewinds files |
 | `swarm.rhai` | work-packet queue over the hive for multi-instance fleets |
 | `goal.rhai` | session goals: pinned, compaction-proof, verified, persisted |
+| `telemetry.rhai` | metadata-only usage stats (counts, tokens, stop reasons) — never prompt/tool content |
 
 Loop features: `--cascade <draft_model>` drafts each turn on a cheap model and escalates only when the judge rejects it; `spawn_subagent(task, model, tag)` + `inbox()` let scripts run background sub-agents.
 

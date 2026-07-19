@@ -335,6 +335,70 @@ fn arena_and_relay_run_pipelines() {
 }
 
 #[test]
+fn telemetry_records_metadata_but_never_content() {
+    let host = load("telemetry.rhai", false);
+    let home = home_isolated();
+    let listener = host.listener().expect("on_event listener");
+
+    let secret_text = "SENTINEL super-secret assistant reply, must never leak";
+    listener(pirs_agent::AgentEvent::TurnEnd {
+        message: Box::new(pirs_ai::AssistantMessage {
+            content: vec![pirs_ai::ContentBlock::text(secret_text)],
+            usage: pirs_ai::Usage {
+                input: 100,
+                cache_read: 20,
+                output: 30,
+                ..Default::default()
+            },
+            stop_reason: pirs_ai::StopReason::Stop,
+            ..Default::default()
+        }),
+        tool_results: vec![],
+    });
+    listener(pirs_agent::AgentEvent::ToolExecutionEnd {
+        tool_call_id: "t1".into(),
+        tool_name: "bash".into(),
+        result: Box::new(pirs_ai::ToolResultMessage {
+            tool_call_id: "t1".into(),
+            tool_name: "bash".into(),
+            content: vec![pirs_ai::ContentBlock::text(
+                "SENTINEL tool output containing secrets",
+            )],
+            details: None,
+            is_error: false,
+            terminate: false,
+            timestamp: 0,
+        }),
+    });
+    listener(pirs_agent::AgentEvent::AgentEnd {
+        messages: vec![],
+    });
+
+    let errs = host.drain_hook_errors();
+    assert!(errs.is_empty(), "hook errors: {errs:?}");
+
+    let logged = std::fs::read_to_string(home.join(".pirs").join("telemetry.jsonl")).unwrap();
+    assert!(
+        !logged.contains("SENTINEL"),
+        "telemetry must never contain assistant text or tool content: {logged}"
+    );
+
+    let lines: Vec<serde_json::Value> = logged
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0]["kind"], "turn");
+    assert_eq!(lines[0]["stopReason"], "Stop");
+    assert_eq!(lines[0]["inputTokens"], 100);
+    assert_eq!(lines[0]["outputTokens"], 30);
+    assert_eq!(lines[1]["kind"], "tool_call");
+    assert_eq!(lines[1]["tool"], "bash");
+    assert_eq!(lines[1]["isError"], false);
+    assert_eq!(lines[2]["kind"], "session_end");
+}
+
+#[test]
 fn hive_note_posts_and_reads() {
     let host = load("hive-note.rhai", false);
     home_isolated();
