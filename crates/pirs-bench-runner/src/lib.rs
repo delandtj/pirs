@@ -22,6 +22,7 @@ use std::time::Instant;
 
 use pirs_agent::agent_loop::{run_agent_loop, Budgets, LoopConfig};
 use pirs_agent::profile::ToolPolicy;
+use pirs_agent::steering::SteeringQueue;
 use pirs_agent::strategy::{self, PhaseDriver, PhaseReq, ToolScope};
 use pirs_agent::trace::Recorder;
 use pirs_agent::{AgentEvent, AgentTool, Emit, ExecutionMode, Hooks};
@@ -85,6 +86,9 @@ pub struct AgentConfig {
     /// Optional flight recorder; when set, every agent event (full messages, tool
     /// args/results, turns) plus phase/attempt boundaries are traced to JSONL.
     pub recorder: Option<Arc<Recorder>>,
+    /// Optional shared steering queue. When set, callers holding a clone can inject
+    /// messages mid-run; when `None`, a private empty queue is used (no steering).
+    pub steering: Option<SteeringQueue>,
 }
 
 /// The agent-backed executor and a [`PhaseDriver`]: it holds the assembled tools,
@@ -123,6 +127,9 @@ pub struct AgentExecutor {
     usage: UsageByModel,
     /// Per-session behavior stats, updated live from the agent event stream.
     stats: Arc<Mutex<SessionStats>>,
+    /// Shared steering queue: external code can push messages that inject into the
+    /// running phase at its next turn/phase boundary.
+    steering: SteeringQueue,
 }
 
 impl AgentExecutor {
@@ -197,6 +204,7 @@ impl AgentExecutor {
             protected,
             usage: UsageByModel::default(),
             stats: Arc::new(Mutex::new(SessionStats::default())),
+            steering: config.steering.unwrap_or_default(),
         })
     }
 
@@ -210,6 +218,12 @@ impl AgentExecutor {
         self.stats.lock().unwrap().clone()
     }
 
+    /// A clone of the steering queue: push to it (from another thread) to inject a
+    /// message into the running phase at its next turn/phase boundary.
+    pub fn steering_handle(&self) -> SteeringQueue {
+        self.steering.clone()
+    }
+
     fn loop_config(&self) -> LoopConfig {
         LoopConfig {
             model: self.model.clone(),
@@ -219,7 +233,13 @@ impl AgentExecutor {
                 ..Default::default()
             },
             tool_execution: ExecutionMode::Parallel,
-            hooks: Hooks::default(),
+            hooks: Hooks {
+                // Steering: a message pushed to the shared queue is injected at the
+                // running phase's next turn boundary (mid-phase), or drained before
+                // the first turn of the next phase (between phases).
+                get_steering_messages: Some(self.steering.as_hook()),
+                ..Default::default()
+            },
             compaction: None,
             visible_tools: None,
             extra_usage: Arc::new(Mutex::new(Usage::default())),
@@ -559,6 +579,7 @@ mod tests {
                 strategy,
                 tool_policy: ToolPolicy::allow_all(),
                 recorder: None,
+                steering: None,
             },
         )
         .unwrap()
@@ -578,6 +599,7 @@ mod tests {
                 strategy: Strategy::plan_exec(),
                 tool_policy: policy,
                 recorder: None,
+                steering: None,
             },
         )
         .unwrap()

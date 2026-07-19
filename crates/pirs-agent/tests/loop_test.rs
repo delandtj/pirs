@@ -117,6 +117,28 @@ impl AgentTool for TerminateTool {
     }
 }
 
+/// A tool that pushes a steering message into a shared queue when called — used to
+/// prove that a message queued *mid-run* (from inside a tool execution) is injected
+/// at the next turn boundary.
+struct SteerOnCallTool(pirs_agent::steering::SteeringQueue);
+
+#[async_trait]
+impl AgentTool for SteerOnCallTool {
+    fn name(&self) -> &str {
+        "steer_now"
+    }
+    fn description(&self) -> &str {
+        "Queues a steering message"
+    }
+    fn parameters(&self) -> Value {
+        json!({"type":"object"})
+    }
+    async fn execute(&self, _ctx: ToolExecContext) -> anyhow::Result<ToolOutput> {
+        self.0.push("mid-run steer: also check the edge case");
+        Ok(ToolOutput::text("queued"))
+    }
+}
+
 fn tool_call_msg(id: &str, name: &str, args: Value) -> AssistantMessage {
     AssistantMessage {
         content: vec![ContentBlock::ToolCall {
@@ -255,6 +277,73 @@ async fn steering_message_injected_mid_run() {
     assert!(new.iter().any(
         |m| matches!(m, Message::User(u) if matches!(&u.content, pirs_ai::UserContent::Text(t) if t == "steered"))
     ));
+}
+
+#[tokio::test]
+async fn steering_queue_primitive_injects_mid_run() {
+    use pirs_agent::agent_loop::{run_agent_loop, Budgets, LoopConfig};
+    use pirs_agent::events::Hooks;
+    use pirs_agent::steering::SteeringQueue;
+    use pirs_agent::Emit;
+
+    let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::new(vec![
+        // Turn 1: call the tool, which queues a steering message mid-run.
+        tool_call_msg("c1", "steer_now", json!({})),
+        // Turn 2 (only reached if steering keeps the loop alive): final answer.
+        text_msg("answer"),
+    ]));
+    let queue = SteeringQueue::new();
+    let tools: Vec<Arc<dyn AgentTool>> = vec![Arc::new(SteerOnCallTool(queue.clone()))];
+
+    let cfg = LoopConfig {
+        model: "m".into(),
+        completion: CompletionOptions::default(),
+        tool_execution: ExecutionMode::Parallel,
+        hooks: Hooks {
+            get_steering_messages: Some(queue.as_hook()),
+            ..Default::default()
+        },
+        compaction: None,
+        visible_tools: None,
+        extra_usage: Arc::new(Mutex::new(pirs_ai::Usage::default())),
+        cascade: None,
+        budgets: Budgets::default(),
+    };
+    let emit: Emit = Arc::new(|_| {});
+    let mut ctx = Context {
+        system_prompt: None,
+        messages: vec![],
+        tools: vec![],
+    };
+    let (msgs, _) = run_agent_loop(
+        vec![Message::user("go")],
+        &mut ctx,
+        &tools,
+        &provider,
+        &cfg,
+        &emit,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+
+    // The queued message was injected as a user turn...
+    let steer_idx = msgs.iter().position(|m| {
+        matches!(m, Message::User(u) if matches!(&u.content, pirs_ai::UserContent::Text(t) if t.contains("edge case")))
+    });
+    let steer_idx = steer_idx.expect("steering message must be injected");
+    // ...and it landed AFTER the tool result (i.e. mid-run, not with the initial prompt).
+    let tool_idx = msgs
+        .iter()
+        .position(|m| matches!(m, Message::ToolResult(_)))
+        .expect("tool result present");
+    assert!(
+        steer_idx > tool_idx,
+        "steering must inject after the tool ran, not before"
+    );
+    // ...and the loop continued to the final answer because of it.
+    assert!(msgs
+        .iter()
+        .any(|m| matches!(m, Message::Assistant(a) if a.text() == "answer")));
 }
 
 #[tokio::test]

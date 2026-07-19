@@ -322,6 +322,7 @@ fn solve_one(
             strategy: ctx.strategy.clone(),
             tool_policy: ctx.tool_policy.clone(),
             recorder: ctx.recorder.clone(),
+            steering: None,
         },
     )
     .context("build agent executor")?;

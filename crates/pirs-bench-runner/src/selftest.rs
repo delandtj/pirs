@@ -406,6 +406,7 @@ pub fn run_selftest(
                         strategy: strategy.clone(),
                         tool_policy: tool_policy.clone(),
                         recorder: recorder.cloned(),
+                        steering: None,
                     },
                 )?);
             }
