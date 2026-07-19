@@ -160,6 +160,50 @@ async fn lsp_tool_end_to_end() {
     tool.shutdown_all().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rename_symbol_updates_all_references_across_files() {
+    if !rust_analyzer_available() {
+        eprintln!("skipping: rust-analyzer not installed");
+        return;
+    }
+    let dir = fixture_crate();
+    let client = LspClient::spawn("rust-analyzer", &[], dir.path())
+        .await
+        .unwrap();
+    let lib = dir.path().join("src/lib.rs");
+    let main = dir.path().join("src/main.rs");
+    client.open_document(&lib, "rust").await.unwrap();
+    client.open_document(&main, "rust").await.unwrap();
+
+    // Warm the reverse index first: only once `references` sees the main.rs call
+    // site is a project-wide rename guaranteed to be complete. Renaming before the
+    // index is ready yields a partial (definition-only) edit — a real race, so we
+    // gate on readiness exactly as a real client would.
+    let refs = poll_until("main.rs", || json_of(client.references(&lib, 1, 8))).await;
+    assert!(refs.contains("main.rs"), "index not ready: {refs}");
+
+    // `target_fn` is defined at src/lib.rs line 1: "pub fn target_fn" → column 8.
+    let workspace_edit = client.rename(&lib, 1, 8, "renamed_fn").await.unwrap();
+    let changed = pirs_lsp::edit::apply_workspace_edit(&workspace_edit).unwrap();
+    assert_eq!(changed.len(), 2, "both files should change: {changed:?}");
+
+    let lib_src = std::fs::read_to_string(&lib).unwrap();
+    assert!(
+        lib_src.contains("renamed_fn"),
+        "lib.rs not renamed: {lib_src}"
+    );
+    assert!(
+        !lib_src.contains("target_fn"),
+        "old name lingers: {lib_src}"
+    );
+    let main_src = std::fs::read_to_string(&main).unwrap();
+    assert!(
+        main_src.contains("fixture::renamed_fn"),
+        "cross-file call site not renamed: {main_src}"
+    );
+    client.shutdown().await;
+}
+
 #[test]
 fn smoke_no_unused_imports() {
     let _ = std::marker::PhantomData::<HashMap<String, String>>;

@@ -567,6 +567,12 @@ async fn main() -> anyhow::Result<()> {
             let lsp_tool = std::sync::Arc::new(pirs_lsp::tool::LspTool::new(cwd.clone()));
             tools.push(lsp_tool.clone());
             sub_tools.push(lsp_tool);
+            // Compound rename: one call rewrites a symbol across the project via
+            // the language server's own reference analysis.
+            let rename_tool =
+                std::sync::Arc::new(pirs_lsp::rename::RenameSymbolTool::new(cwd.clone()));
+            tools.push(rename_tool.clone());
+            sub_tools.push(rename_tool);
         }
     }
     let mut policy_hooks: Option<(

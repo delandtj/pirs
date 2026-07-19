@@ -225,7 +225,14 @@ impl LspClient {
                         "definition": { "linkSupport": false },
                         "references": {},
                         "hover": { "contentFormat": ["plaintext"] },
-                        "documentSymbol": { "hierarchicalDocumentSymbolSupport": true }
+                        "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
+                        "rename": { "prepareSupport": false }
+                    },
+                    "workspace": {
+                        "workspaceEdit": {
+                            "documentChanges": true,
+                            "resourceOperations": []
+                        }
                     }
                 },
                 "clientInfo": { "name": "pirs", "version": env!("CARGO_PKG_VERSION") },
@@ -399,6 +406,22 @@ impl LspClient {
         self.request(method, params).await
     }
 
+    /// Ask the server to rename the symbol at `(line, character)` to `new_name`,
+    /// returning the WorkspaceEdit (the set of text edits across all files). Uses
+    /// the same indexing-retry as references, since rust-analyzer answers `null`
+    /// while still indexing.
+    pub async fn rename(
+        &self,
+        path: &std::path::Path,
+        line: u32,
+        character: u32,
+        new_name: &str,
+    ) -> anyhow::Result<Value> {
+        let mut params = self.position_params(path, line, character);
+        params["newName"] = json!(new_name);
+        self.request_indexed("textDocument/rename", params).await
+    }
+
     pub async fn hover(
         &self,
         path: &std::path::Path,
@@ -441,7 +464,7 @@ fn uri_for(path: &std::path::Path) -> String {
 
 /// Inverse of `uri_for`: decode a `file://` URI back to a path, undoing the
 /// percent-encoding. Falls back to a literal strip for non-URL inputs.
-fn path_from_uri(uri: &str) -> std::path::PathBuf {
+pub fn path_from_uri(uri: &str) -> std::path::PathBuf {
     url::Url::parse(uri)
         .ok()
         .and_then(|u| u.to_file_path().ok())
