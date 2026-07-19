@@ -1,12 +1,14 @@
-//! Every shipped example profile must load and resolve into a runnable role.
+//! Every profile shipped in the repo's `.pirs/profiles/` must load and resolve
+//! into a runnable role (`pirs --profile <name>`).
 
 use std::path::PathBuf;
 
 use pirs_agent::strategy::Step;
 use pirs_rhai::profile_script::load_profile_file;
 
+/// The repo's shipped profiles live in `<workspace>/.pirs/profiles`.
 fn profiles_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("profiles")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.pirs/profiles")
 }
 
 #[test]
@@ -24,7 +26,7 @@ fn every_shipped_profile_loads_and_resolves() {
         assert!(!resolved.steps.is_empty(), "{} is empty", path.display());
         loaded += 1;
     }
-    assert!(loaded >= 1, "expected at least one example profile");
+    assert!(loaded >= 1, "expected at least one shipped profile");
 }
 
 #[test]

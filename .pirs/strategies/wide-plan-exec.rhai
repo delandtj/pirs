@@ -8,7 +8,8 @@
 // branch's plan under a `## Branch N` heading into the executor's `{prev}`; use
 // `join: "first"` to keep only the primary branch.
 //
-//   pirs-bench selftest --agent --provider deepseek --model deepseek-v4-flash \
+//   pirs --strategy wide-plan-exec "diagnose and fix the race in worker.rs"
+// or in the bench:  pirs-bench selftest --agent --model deepseek-v4-flash \
 //       --strategy-script this-file.rhai --trace run.jsonl ...
 //
 // In the trace, the three planner phase.start events share one attempt and their

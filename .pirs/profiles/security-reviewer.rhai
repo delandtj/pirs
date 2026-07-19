@@ -5,7 +5,9 @@
 // strategy's own Oracle lever if you swap to plan-oracle-exec), and the shell is
 // denied so the role can only read, edit, and run the suite.
 //
-//   pirs-bench solve --provider deepseek --model deepseek-v4-flash \
+// Run it by name (resolved from .pirs/profiles/, then ~/.pirs/profiles/):
+//   pirs --profile security-reviewer "review and fix the auth check in login.py"
+// or in the bench:  pirs-bench solve --model deepseek-v4-flash \
 //       --profile this-file.rhai --issue "..." --targets "tests/t.py::test_x"
 //
 // `resolved_strategy()` prepends the persona to each phase's system prompt and

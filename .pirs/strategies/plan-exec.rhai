@@ -1,6 +1,9 @@
-// A user-authored loop strategy, equivalent to the built-in `plan-exec`.
+// The plan → execute loop as a discoverable strategy. A read-only planner finds
+// the root cause and writes a self-contained plan; a fresh executor applies it.
 //
-// Run it with:  pirs-bench selftest --agent --strategy-script this-file.rhai ...
+// Run it by name (resolved from .pirs/strategies/, then ~/.pirs/strategies/):
+//   pirs --strategy plan-exec "fix the failing test in foo.py"
+// or in the bench:  pirs-bench selftest --agent --strategy-script this-file.rhai ...
 //
 // A strategy is data: a map with an ordered `phases` list. Each phase runs as its
 // own agent sub-loop. Prompt placeholders are filled in at run time:

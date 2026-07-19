@@ -4,11 +4,11 @@
 // critic — the "second opinion" — is pinned to a stronger reasoning model via a
 // per-phase `model` field. Run with a fast default so the contrast is real:
 //
-//   pirs-bench selftest --agent --provider deepseek --model deepseek-v4-flash \
+//   pirs --provider openai --base-url https://api.deepseek.com \
+//        --model deepseek-v4-flash --strategy plan-oracle-exec "fix ..."
+// or in the bench, where the trace's phase.start events show each phase's model:
+//   pirs-bench selftest --agent --model deepseek-v4-flash \
 //       --strategy-script this-file.rhai --trace run.jsonl ...
-//
-// The trace's phase.start events show each phase's model, so you can verify the
-// critic ran on the oracle and measure whether the second opinion paid off.
 
 #{
     name: "plan-oracle-exec",

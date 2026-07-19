@@ -1,13 +1,15 @@
-//! Every shipped example strategy script must actually load. These files are the
-//! user-facing documentation of the strategy DSL; if a schema change breaks one,
-//! this test fails before the example does in someone's hands.
+//! Every strategy shipped in the repo's `.pirs/strategies/` must actually load.
+//! These are first-class, name-discoverable strategies (`pirs --strategy <name>`)
+//! and the working reference for the strategy DSL; if a schema change breaks one,
+//! this test fails before it breaks in someone's hands.
 
 use std::path::PathBuf;
 
 use pirs_rhai::strategy_script::load_strategy_file;
 
+/// The repo's shipped strategies live in `<workspace>/.pirs/strategies`.
 fn strategies_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("strategies")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.pirs/strategies")
 }
 
 #[test]
@@ -30,7 +32,7 @@ fn every_shipped_strategy_script_loads() {
     }
     assert!(
         loaded >= 3,
-        "expected at least 3 example scripts, saw {loaded}"
+        "expected at least 3 shipped strategies, saw {loaded}"
     );
 }
 
