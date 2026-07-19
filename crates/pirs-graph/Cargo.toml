@@ -13,6 +13,7 @@ async-trait = { workspace = true }
 anyhow = { workspace = true }
 ignore = { workspace = true }
 rusqlite = { version = "0.31", features = ["bundled"] }
+tantivy = "0.26"
 tracing = { workspace = true }
 schemars = { workspace = true }
 tree-sitter = "0.25"
