@@ -543,6 +543,46 @@ fn error_message(model: &str, error: String) -> AssistantMessage {
     }
 }
 
+/// Whether `model` is on Anthropic's adaptive-thinking API (Claude 4.6 and
+/// newer). Those models reject `thinking.budget_tokens` with a 400 and take
+/// `thinking: {type: "adaptive"}` + `output_config.effort` instead. Unknown or
+/// future model strings default to adaptive (the modern path); only explicitly
+/// pre-4.6 families fall back to `budget_tokens`.
+fn uses_adaptive_thinking(model: &str) -> bool {
+    const LEGACY: &[&str] = &[
+        "opus-4-5",
+        "opus-4-1",
+        "opus-4-0",
+        "opus-4-20",
+        "sonnet-4-5",
+        "sonnet-4-0",
+        "sonnet-4-20",
+        "haiku-4-5",
+        "haiku-3",
+        "3-5-sonnet",
+        "3-7-sonnet",
+        "3-5-haiku",
+        "3-opus",
+        "3-sonnet",
+        "3-haiku",
+        "claude-2",
+    ];
+    let m = model.to_ascii_lowercase();
+    !LEGACY.iter().any(|needle| m.contains(needle))
+}
+
+/// Map an internal reasoning-effort label onto an Anthropic `output_config.effort` level.
+fn adaptive_effort(effort: &str) -> &'static str {
+    match effort {
+        "minimal" | "low" => "low",
+        "medium" => "medium",
+        "high" => "high",
+        "xhigh" => "xhigh",
+        "max" => "max",
+        _ => "high",
+    }
+}
+
 pub fn build_request_body(model: &str, ctx: &Context, options: &CompletionOptions) -> Value {
     let mut body = json!({
         "model": model,
@@ -552,16 +592,26 @@ pub fn build_request_body(model: &str, ctx: &Context, options: &CompletionOption
     });
     if let Some(effort) = &options.reasoning_effort {
         if effort != "off" {
-            let budget = match effort.as_str() {
-                "minimal" => 1024,
-                "low" => 2048,
-                "medium" => 8192,
-                "high" => 16384,
-                _ => 32768,
-            };
-            let max_out = options.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-            let budget = budget.min(max_out.saturating_sub(1024).max(1024));
-            body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+            if uses_adaptive_thinking(model) {
+                // Claude 4.6+ (Opus 4.6/4.7/4.8, Sonnet 5, Fable/Mythos 5, ...):
+                // `budget_tokens` is rejected with a 400. Thinking depth is
+                // controlled by adaptive thinking plus `output_config.effort`.
+                body["thinking"] = json!({ "type": "adaptive" });
+                body["output_config"] = json!({ "effort": adaptive_effort(effort) });
+            } else {
+                // Legacy models (Opus 4.5/4.1, Sonnet 4.5, Haiku 4.5, 3.x, ...)
+                // still require an explicit thinking-token budget.
+                let budget = match effort.as_str() {
+                    "minimal" => 1024,
+                    "low" => 2048,
+                    "medium" => 8192,
+                    "high" => 16384,
+                    _ => 32768,
+                };
+                let max_out = options.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+                let budget = budget.min(max_out.saturating_sub(1024).max(1024));
+                body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+            }
         }
     }
     if let Some(sp) = &ctx.system_prompt {
@@ -968,5 +1018,68 @@ mod tests {
             data: "not json".into(),
         };
         assert!(parse_sse_event(&item3).is_none());
+    }
+
+    #[test]
+    fn thinking_uses_adaptive_on_current_models() {
+        // budget_tokens is a 400 on Fable 5 / Sonnet 5 / Opus 4.6+ — the request
+        // must carry adaptive thinking plus output_config.effort instead.
+        let ctx = Context {
+            system_prompt: None,
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+        };
+        let options = CompletionOptions {
+            reasoning_effort: Some("high".into()),
+            ..Default::default()
+        };
+        for model in ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5"] {
+            let body = build_request_body(model, &ctx, &options);
+            assert_eq!(
+                body["thinking"]["type"], "adaptive",
+                "{model} must use adaptive thinking"
+            );
+            assert!(
+                body["thinking"].get("budget_tokens").is_none(),
+                "{model} must not send budget_tokens (400)"
+            );
+            assert_eq!(body["output_config"]["effort"], "high");
+        }
+    }
+
+    #[test]
+    fn thinking_uses_budget_tokens_on_legacy_models() {
+        let ctx = Context {
+            system_prompt: None,
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+        };
+        let options = CompletionOptions {
+            reasoning_effort: Some("medium".into()),
+            max_tokens: Some(32000),
+            ..Default::default()
+        };
+        for model in ["claude-opus-4-5", "claude-3-5-sonnet-20241022"] {
+            let body = build_request_body(model, &ctx, &options);
+            assert_eq!(body["thinking"]["type"], "enabled", "{model}");
+            assert_eq!(body["thinking"]["budget_tokens"], 8192, "{model}");
+            assert!(body.get("output_config").is_none(), "{model}");
+        }
+    }
+
+    #[test]
+    fn thinking_off_emits_no_thinking_config() {
+        let ctx = Context {
+            system_prompt: None,
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+        };
+        let options = CompletionOptions {
+            reasoning_effort: Some("off".into()),
+            ..Default::default()
+        };
+        let body = build_request_body("claude-fable-5", &ctx, &options);
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
     }
 }
