@@ -61,7 +61,7 @@ impl AgentTool for EditTool {
         if args.edits.is_empty() {
             bail!("edits must contain at least one replacement");
         }
-        let path = paths::resolve(&self.cwd, &args.path);
+        let path = paths::resolve_contained(&self.cwd, &args.path)?;
         let _mutation_guard = crate::filelock::lock(&path).await;
         let raw =
             std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;

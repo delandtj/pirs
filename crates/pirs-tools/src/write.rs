@@ -53,7 +53,7 @@ impl AgentTool for WriteTool {
                 args.content.len()
             );
         }
-        let path = paths::resolve(&self.cwd, &args.path);
+        let path = paths::resolve_contained(&self.cwd, &args.path)?;
         let _mutation_guard = crate::filelock::lock(&path).await;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)

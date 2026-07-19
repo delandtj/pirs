@@ -48,7 +48,7 @@ impl AgentTool for LsTool {
 
     async fn execute(&self, ctx: ToolExecContext) -> anyhow::Result<ToolOutput> {
         let args: LsArgs = serde_json::from_value(ctx.args)?;
-        let path = paths::resolve(&self.cwd, args.path.as_deref().unwrap_or("."));
+        let path = paths::resolve_contained(&self.cwd, args.path.as_deref().unwrap_or("."))?;
         let limit = args.limit.unwrap_or(500);
 
         let mut entries: Vec<String> = Vec::new();

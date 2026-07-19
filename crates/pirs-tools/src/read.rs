@@ -95,7 +95,7 @@ impl AgentTool for ReadTool {
 
     async fn execute(&self, ctx: ToolExecContext) -> anyhow::Result<ToolOutput> {
         let args: ReadArgs = serde_json::from_value(ctx.args)?;
-        let path = paths::resolve(&self.cwd, &args.path);
+        let path = paths::resolve_contained(&self.cwd, &args.path)?;
 
         if let Some(ext) = path
             .extension()

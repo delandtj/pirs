@@ -69,7 +69,7 @@ impl AgentTool for GrepTool {
             .build()
             .with_context(|| format!("invalid pattern: {}", args.pattern))?;
 
-        let root = paths::resolve(&self.cwd, args.path.as_deref().unwrap_or("."));
+        let root = paths::resolve_contained(&self.cwd, args.path.as_deref().unwrap_or("."))?;
         let limit = args.limit.unwrap_or(100);
         let context_lines = args.context.unwrap_or(0);
 

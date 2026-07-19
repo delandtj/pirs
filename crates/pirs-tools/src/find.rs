@@ -50,7 +50,7 @@ impl AgentTool for FindTool {
 
     async fn execute(&self, ctx: ToolExecContext) -> anyhow::Result<ToolOutput> {
         let args: FindArgs = serde_json::from_value(ctx.args)?;
-        let root = paths::resolve(&self.cwd, args.path.as_deref().unwrap_or("."));
+        let root = paths::resolve_contained(&self.cwd, args.path.as_deref().unwrap_or("."))?;
         let limit = args.limit.unwrap_or(1000);
 
         let mut builder = globset::GlobSetBuilder::new();
