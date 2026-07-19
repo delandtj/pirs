@@ -116,6 +116,105 @@ fn incremental_refresh_equals_full_parse_across_add_change_delete() {
     assert!(g4.symbol("other").is_empty(), "deleted file's symbols gone");
 }
 
+const SEM_RS: &str = r#"
+fn authenticate(token: String) -> bool { validate(token) }
+fn validate(token: String) -> bool { true }
+fn render_widget(w: Widget) -> String { draw(w) }
+fn draw(w: Widget) -> String { String::new() }
+struct Widget { width: i32 }
+"#;
+
+/// A deterministic, network-free bag-of-words "embedder": each whitespace token
+/// increments a hashed bucket. Symbols sharing tokens with a query score high —
+/// enough to exercise ranking without a real model.
+fn fake_embed(text: &str, dim: usize) -> Vec<f32> {
+    let mut v = vec![0.0f32; dim];
+    for tok in text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+    {
+        let mut h: usize = 1469598103934665603usize.wrapping_mul(1099511628211);
+        for b in tok.bytes() {
+            h = (h ^ b as usize).wrapping_mul(1099511628211);
+        }
+        v[h % dim] += 1.0;
+    }
+    v
+}
+
+#[test]
+fn semantic_embed_store_search_and_model_guard() {
+    const DIM: usize = 128;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let db = root.join(".pirs/graph.db");
+    write(root, "sem.rs", SEM_RS);
+
+    let mut store = GraphStore::open(&db, root).unwrap();
+    store.refresh().unwrap(); // populate symbols
+
+    // First model stamp: a wipe (there were no embeddings), full set pending.
+    assert!(
+        store.ensure_model("fake-v1", DIM).unwrap(),
+        "first stamp wipes"
+    );
+    let pending = store.pending_embeddings(2000).unwrap();
+    assert!(pending.len() >= 5, "all symbols pending: {}", pending.len());
+
+    // Embed and store.
+    let vecs: Vec<Vec<f32>> = pending.iter().map(|it| fake_embed(&it.text, DIM)).collect();
+    store.store_embeddings(&pending, &vecs).unwrap();
+    assert_eq!(store.embedding_count().unwrap(), pending.len());
+    assert!(
+        store.pending_embeddings(2000).unwrap().is_empty(),
+        "nothing left to embed after storing"
+    );
+
+    // Search: query token "authenticate" appears only in the authenticate symbol.
+    let q = fake_embed("authenticate", DIM);
+    let hits = store.search(&q, 3).unwrap();
+    assert_eq!(
+        hits[0].name, "authenticate",
+        "top hit for its own token: {hits:?}"
+    );
+    assert!(hits[0].score > 0.0);
+
+    // Model-swap guard: a different model must wipe every vector (silent
+    // cross-space comparison would otherwise return garbage).
+    assert!(
+        store.ensure_model("fake-v2", DIM).unwrap(),
+        "model change wipes"
+    );
+    assert_eq!(
+        store.embedding_count().unwrap(),
+        0,
+        "vectors dropped on model swap"
+    );
+    assert!(
+        !store.pending_embeddings(2000).unwrap().is_empty(),
+        "re-embed due"
+    );
+
+    // Re-embed under v2, then CHANGE the file: its embeddings must drop so the
+    // changed symbols are re-embedded, keeping vectors in sync with source.
+    let pend2 = store.pending_embeddings(2000).unwrap();
+    let v2: Vec<Vec<f32>> = pend2.iter().map(|it| fake_embed(&it.text, DIM)).collect();
+    store.store_embeddings(&pend2, &v2).unwrap();
+    assert_eq!(store.pending_embeddings(2000).unwrap().len(), 0);
+
+    write(
+        root,
+        "sem.rs",
+        &format!("{SEM_RS}\nfn added() -> bool {{ true }}\n"),
+    );
+    let mut store2 = GraphStore::open(&db, root).unwrap();
+    store2.refresh().unwrap();
+    assert!(
+        !store2.pending_embeddings(2000).unwrap().is_empty(),
+        "changed file's symbols need re-embedding"
+    );
+}
+
 #[test]
 fn corrupt_db_is_recreated_not_fatal() {
     let dir = tempfile::tempdir().unwrap();
