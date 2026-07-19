@@ -211,8 +211,16 @@ fn solve_one(job: Job, ctx: &SolveCtx, cache: &mut BaselineCache) -> anyhow::Res
     let inst = Instance { repo_root: repo, targets: job.targets, keep_green: job.keep_green, base_sha };
     let report = run_instance(&inst, ctx.host, cache, &mut executor, ctx.common.max_attempts, workspace.as_ref())?;
     // Surface this session's behavior + token cost.
-    eprintln!("session: {}", executor.session_stats().summary());
+    let stats = executor.session_stats();
+    eprintln!("session: {}", stats.summary());
     eprintln!("{}", executor.session_usage().report());
+    // Where every second went: harness phases (discover/bootstrap/baseline/fix/
+    // verify/patch) and, within the fix phase, per-tool wall-clock.
+    eprintln!("{}", report.timings.report());
+    let tool_time = stats.tool_time_summary();
+    if !tool_time.is_empty() {
+        eprintln!("  fix→tools: {tool_time}");
+    }
     Ok(report)
 }
 
@@ -262,6 +270,7 @@ fn run_batch(a: BatchArgs) -> anyhow::Result<()> {
     let mut cache = BaselineCache::in_memory();
     let ctx = SolveCtx { common: &a.common, provider: &provider, api_key: &key, host: &host };
     let mut attribution = Attribution::new();
+    let mut timings = pirs_bench::Timings::new();
 
     for (lineno, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -290,6 +299,7 @@ fn run_batch(a: BatchArgs) -> anyhow::Result<()> {
 
         eprintln!("[{id}] {:?}", report.outcome);
         attribution.record(&report.outcome);
+        timings.merge(&report.timings);
         if let (Some(dir), Some(patch)) = (&a.out_dir, &report.patch) {
             let path = dir.join(format!("{id}.patch"));
             std::fs::write(&path, patch).with_context(|| format!("write {path:?}"))?;
@@ -297,6 +307,7 @@ fn run_batch(a: BatchArgs) -> anyhow::Result<()> {
     }
 
     println!("{}", attribution.report());
+    println!("aggregate {}", timings.report());
     Ok(())
 }
 
@@ -318,6 +329,7 @@ fn run_selftest(a: SelftestArgs) -> anyhow::Result<u8> {
     if !report.usage.is_empty() {
         println!("{}", report.usage.report());
     }
+    println!("aggregate {}", report.timings.report());
 
     // Oracle mode must solve everything — any miss is a harness defect. Agent
     // mode is model-limited, so we report but don't hard-fail on misses.

@@ -6,6 +6,7 @@
 //! that just emitted prose). Both are collected per session and aggregate.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use pirs_ai::Usage;
 
@@ -66,12 +67,26 @@ pub struct SessionStats {
     pub turns: u32,
     pub tool_calls: u32,
     pub tool_counts: HashMap<String, u32>,
+    /// Cumulative wall-clock spent inside each tool, keyed by tool name. Note:
+    /// tools may run concurrently, so the sum can exceed real elapsed time — this
+    /// is "time attributable to tool X", not a partition of the clock.
+    pub tool_time: HashMap<String, Duration>,
 }
 
 impl SessionStats {
     pub fn record_tool(&mut self, name: &str) {
         self.tool_calls += 1;
         *self.tool_counts.entry(name.to_string()).or_default() += 1;
+    }
+
+    /// Attribute a completed tool execution's wall-clock to its tool name.
+    pub fn add_tool_time(&mut self, name: &str, d: Duration) {
+        *self.tool_time.entry(name.to_string()).or_default() += d;
+    }
+
+    /// Total wall-clock attributed to tools (see the caveat on `tool_time`).
+    pub fn tool_time_total(&self) -> Duration {
+        self.tool_time.values().copied().sum()
     }
 
     /// Compact one-line summary, e.g. `turns=6 tools=9 [edit:3 read:4 bash:2]`.
@@ -84,6 +99,17 @@ impl SessionStats {
             .collect::<Vec<_>>()
             .join(" ");
         format!("turns={} tools={} [{}]", self.turns, self.tool_calls, breakdown)
+    }
+
+    /// Per-tool wall-clock breakdown, biggest first, e.g. `bash:4.10s edit:0.02s`.
+    /// Empty string when no tool timing was recorded.
+    pub fn tool_time_summary(&self) -> String {
+        let mut rows: Vec<_> = self.tool_time.iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        rows.iter()
+            .map(|(n, d)| format!("{n}:{:.2}s", d.as_secs_f64()))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 

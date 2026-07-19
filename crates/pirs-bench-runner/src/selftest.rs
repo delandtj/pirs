@@ -17,7 +17,8 @@ use std::sync::Arc;
 use anyhow::{bail, Context as _};
 use pirs_ai::LlmProvider;
 use pirs_bench::{
-    run_instance, Attribution, BaselineCache, DetectorHost, Executor, GitWorkspace, Instance, Verdict,
+    run_instance, Attribution, BaselineCache, DetectorHost, Executor, GitWorkspace, Instance,
+    Timings, Verdict,
 };
 
 use crate::metrics::UsageByModel;
@@ -293,6 +294,7 @@ pub fn run_selftest(dir: &Path, count: usize, mode: &Mode) -> anyhow::Result<Sel
     let mut attribution = Attribution::new();
     let mut failures = Vec::new();
     let mut total_usage = UsageByModel::default();
+    let mut total_timings = Timings::new();
 
     for i in 0..count {
         let proj = TEMPLATES[i % TEMPLATES.len()](i);
@@ -348,6 +350,7 @@ pub fn run_selftest(dir: &Path, count: usize, mode: &Mode) -> anyhow::Result<Sel
 
         let report = run_instance(&inst, &host, &mut cache, exec, 3, Some(&ws))?;
         attribution.record(&report.outcome);
+        total_timings.merge(&report.timings);
 
         let mark = if report.outcome.is_accepted() { "ok " } else { "FAIL" };
         // In agent mode, surface per-session behavior + token cost.
@@ -359,13 +362,26 @@ pub fn run_selftest(dir: &Path, count: usize, mode: &Mode) -> anyhow::Result<Sel
             }
             None => String::new(),
         };
-        eprintln!("[{mark}] {} -> {:?}{extra}", proj.id, report.outcome);
+        // Per-session wall-clock: total plus its biggest phase, so a slow instance
+        // is legible at a glance without dumping the full breakdown per line.
+        let t = report.timings.total().as_secs_f64();
+        let slow = report
+            .timings
+            .by_label()
+            .into_iter()
+            .next()
+            .map(|(l, d, _)| format!(" {l} {:.1}s", d.as_secs_f64()))
+            .unwrap_or_default();
+        eprintln!(
+            "[{mark}] {} -> {:?}{extra} | {t:.1}s{slow}",
+            proj.id, report.outcome
+        );
         if !report.outcome.is_accepted() {
             failures.push(format!("{} ({:?})", proj.id, report.outcome));
         }
     }
 
-    Ok(SelftestReport { attribution, failures, usage: total_usage })
+    Ok(SelftestReport { attribution, failures, usage: total_usage, timings: total_timings })
 }
 
 /// Aggregate outcome of a self-test run.
@@ -373,6 +389,8 @@ pub struct SelftestReport {
     pub attribution: Attribution,
     pub failures: Vec<String>,
     pub usage: UsageByModel,
+    /// Phase timing aggregated across every self-test instance.
+    pub timings: Timings,
 }
 
 /// `git init` + commit the current tree so `GitWorkspace` has a base to diff and

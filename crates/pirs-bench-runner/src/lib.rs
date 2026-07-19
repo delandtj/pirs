@@ -15,9 +15,10 @@
 pub mod metrics;
 pub mod selftest;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use pirs_agent::agent_loop::{run_agent_loop, Budgets, LoopConfig};
 use pirs_agent::{AgentEvent, AgentTool, Emit, ExecutionMode, Hooks};
@@ -247,9 +248,20 @@ impl Executor for AgentExecutor {
         // Live behavior stats: count turns and tool calls off the event stream so
         // we can tell a real fix from a model that only produced prose.
         let stats = Arc::clone(&self.stats);
+        // Correlate start→end by tool_call_id to attribute wall-clock per tool,
+        // so "where every second went" separates LLM latency from tool execution.
+        let pending: Arc<Mutex<HashMap<String, Instant>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let emit: Emit = Arc::new(move |ev| match ev {
-            AgentEvent::ToolExecutionStart { tool_name, .. } => {
+            AgentEvent::ToolExecutionStart { tool_call_id, tool_name, .. } => {
                 stats.lock().unwrap().record_tool(&tool_name);
+                pending.lock().unwrap().insert(tool_call_id, Instant::now());
+            }
+            AgentEvent::ToolExecutionEnd { tool_call_id, tool_name, .. } => {
+                let start = pending.lock().unwrap().remove(&tool_call_id);
+                if let Some(start) = start {
+                    stats.lock().unwrap().add_tool_time(&tool_name, start.elapsed());
+                }
             }
             AgentEvent::TurnEnd { .. } => {
                 stats.lock().unwrap().turns += 1;
