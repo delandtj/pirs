@@ -8,12 +8,15 @@
 pub mod command;
 pub mod gate;
 pub mod junit;
+pub mod probe;
+pub mod proc;
 pub mod report;
 pub mod run;
 pub mod types;
 
 pub use command::CommandRunner;
 pub use gate::{evaluate, Verdict};
+pub use probe::{probe, ProbeResult};
 pub use report::Attribution;
 pub use run::{verify, TestRunner, VerifyPlan};
 pub use types::{FailBucket, Outcome, Ring, RunnerSpec, Snapshot, TestId, TestOutcome};
