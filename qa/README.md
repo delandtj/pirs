@@ -54,6 +54,21 @@ These map to: background-job tools (`jobs`/`job_output`/`job_kill`/`job_wait`/`w
 Unix-socket fleet control (`spawn`/`list`/`status`/`stop`/`rpc`), and the
 Rhai swarm pack over a shared JSONL queue.
 
+## Incremental graph index (`--persist-graph`)
+
+Persistent, incrementally-refreshed code-graph cache (SQLite). Skips re-parsing
+unchanged files on warm starts — the scaling lever for large repos.
+
+| # | Feature | Proof | What it demonstrates |
+|---|---------|-------|----------------------|
+| 12 | Incremental graph store | `live/12-persist-graph.log` | On the pirs repo: **cold** run parses all 142 files → 2065 symbols, writes `.pirs/graph.db` (0.9s); **warm** run re-parses **0**, all 142 unchanged, same 2065 symbols (0.2s, ~4.5× faster); after touching one file, **exactly 1** re-parsed, 141 unchanged — same 2065 symbols. Symbol count identical across all three = equivalence holds live. |
+
+Correctness is also test-pinned in `crates/pirs-graph/tests/store_test.rs`:
+`incremental_refresh_equals_full_parse_across_add_change_delete` asserts the
+incrementally-refreshed graph is set-equivalent to a from-scratch parse across
+adds, changes, and deletes; `corrupt_db_is_recreated_not_fatal` proves a garbage
+cache is wiped and rebuilt rather than breaking the agent.
+
 ## Discovery
 
 | Feature | Proof | What it demonstrates |

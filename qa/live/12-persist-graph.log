@@ -1,0 +1,24 @@
+############################################################
+# COLD run (no .pirs/graph.db yet): store must parse everything
+############################################################
+2026-07-19T17:22:20.582032Z  INFO pirs_graph::store: graph store: 142 reparsed, 0 unchanged, 0 deleted -> 2065 symbols
+2026-07-19T17:22:20.775548Z  INFO pirs_graph: code graph built: 2065 symbols in 0.9s (persistent)
+-- graph.db created? --
+569344 .pirs/graph.db
+-- symbol count in the db --
+symbols: 2065
+-- tracked files count in db --
+files: 142
+
+############################################################
+# WARM run (cache present, nothing changed): reparsed must be 0
+############################################################
+2026-07-19T17:22:25.687013Z  INFO pirs_graph::store: graph store: 0 reparsed, 142 unchanged, 0 deleted -> 2065 symbols
+2026-07-19T17:22:25.844542Z  INFO pirs_graph: code graph built: 2065 symbols in 0.2s (persistent)
+
+############################################################
+# WARM run after touching ONE file: exactly 1 reparsed
+############################################################
+2026-07-19T17:22:30.816087Z  INFO pirs_graph::store: graph store: 1 reparsed, 141 unchanged, 0 deleted -> 2065 symbols
+2026-07-19T17:22:30.980024Z  INFO pirs_graph: code graph built: 2065 symbols in 0.2s (persistent)
+== DONE ==
