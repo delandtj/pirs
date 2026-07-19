@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context as _};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use pirs_agent::{Agent, AgentEvent, AgentTool, Hooks};
 use pirs_ai::{CompletionOptions, Message, OpenAiCompat};
 use rustyline::error::ReadlineError;
@@ -12,6 +12,7 @@ use rustyline::DefaultEditor;
 mod approval;
 mod auth;
 mod blame;
+mod config_file;
 mod discovery;
 mod pack;
 mod replay;
@@ -194,6 +195,11 @@ struct Cli {
     /// Allow --serve to bind non-loopback addresses
     #[arg(long)]
     serve_external: bool,
+
+    /// Print how model/provider/base-url/approval were each resolved (cli
+    /// flag / env var / project config / user config / default) and exit.
+    #[arg(long)]
+    show_config: bool,
 }
 
 struct Printer {
@@ -330,7 +336,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let mut cli = Cli::parse();
+    // Parsed via ArgMatches (rather than plain `Cli::parse()`) so
+    // `value_source()` can tell a value the user actually typed/exported
+    // apart from one that just fell through to clap's hardcoded default —
+    // that distinction is what lets project/user config.toml layers fill in
+    // underneath CLI/env without ever overriding something the user set.
+    let matches = Cli::command().get_matches();
+    let mut cli =
+        Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     // Flatten trailing args into the single prompt string the rest of main
     // (and the pseudo-subcommands) expect.
     let cli = Cli {
@@ -342,6 +355,55 @@ async fn main() -> anyhow::Result<()> {
                 vec![parts.join(" ")]
             }
         },
+        ..cli
+    };
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let (project_cfg, user_cfg) = config_file::load_layers(&cwd);
+    let (model, model_src) = config_file::resolve_str(
+        &matches,
+        "model",
+        &cli.model,
+        project_cfg.model.as_deref(),
+        user_cfg.model.as_deref(),
+    );
+    let (provider, provider_src) = config_file::resolve_str(
+        &matches,
+        "provider",
+        &cli.provider,
+        project_cfg.provider.as_deref(),
+        user_cfg.provider.as_deref(),
+    );
+    let (base_url, base_url_src) = config_file::resolve_opt(
+        &matches,
+        "base_url",
+        cli.base_url.clone(),
+        project_cfg.base_url.as_deref(),
+        user_cfg.base_url.as_deref(),
+    );
+    let (approval, approval_src) = config_file::resolve_str(
+        &matches,
+        "approval",
+        &cli.approval,
+        project_cfg.approval.as_deref(),
+        user_cfg.approval.as_deref(),
+    );
+    if cli.show_config {
+        println!("model:      {model:<24} ({})", model_src.label());
+        println!("provider:   {provider:<24} ({})", provider_src.label());
+        println!(
+            "base_url:   {:<24} ({})",
+            base_url.as_deref().unwrap_or("(none)"),
+            base_url_src.label()
+        );
+        println!("approval:   {approval:<24} ({})", approval_src.label());
+        return Ok(());
+    }
+    let cli = Cli {
+        model,
+        provider,
+        base_url,
+        approval,
         ..cli
     };
 

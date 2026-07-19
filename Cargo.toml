@@ -37,6 +37,7 @@ clap = { version = "4", features = ["derive", "env"] }
 rustyline = "15"
 regex = "1"
 ignore = "0.4"
+toml = "0.8"
 unicode-normalization = "0.1"
 directories = "6"
 tracing = "0.1"

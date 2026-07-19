@@ -124,6 +124,22 @@ Standard conventions are honored at startup, project dir first then `$HOME`:
 - **Commands**: `*.md` in `.claude/commands/`, `.agents/commands/`, `.pirs/commands/` — become `/name` slash commands; `$ARGUMENTS` is substituted with the text after the command.
 - **Context**: `AGENTS.md` / `CLAUDE.md` in the project root are appended to the system prompt.
 
+## Config file
+
+`--model`/`--provider`/`--base-url`/`--approval` can be pinned in a TOML file
+instead of retyping the flag every run: `.pirs/config.toml` (project, nearest
+ancestor of cwd wins) sits above `~/.pirs/config.toml` (user), both below
+whatever a CLI flag or env var already set. `--show-config` prints where each
+of the four settings actually came from (`cli flag` / `env var` / `project
+config` / `user config` / `default`):
+
+```toml
+# .pirs/config.toml
+model = "gpt-5-mini"
+provider = "openai"
+approval = "ask"
+```
+
 ## Orchestrator
 
 Run fleets of headless agents (`pirs --mode rpc`, pi-compatible JSONL RPC):
