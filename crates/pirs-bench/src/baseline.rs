@@ -5,8 +5,11 @@
 //! and red on the next would poison every later comparison. Capture therefore
 //! runs the set twice and requires agreement — otherwise the signal is unusable.
 
+use std::collections::HashMap;
+
+use crate::cache::BaselineCache;
 use crate::run::TestRunner;
-use crate::types::{Ring, Snapshot, TestId};
+use crate::types::{Ring, Snapshot, TestId, TestOutcome};
 
 /// Capture a **stable** baseline over `ids`: run twice and require identical
 /// per-test outcomes. Returns `None` (unstable) if any test disagreed between
@@ -26,6 +29,40 @@ pub fn capture_stable(
     let mut snap = first;
     snap.runs = 2;
     Ok(Some(snap))
+}
+
+/// Like [`capture_stable`] but consults a SHA-keyed [`BaselineCache`]: tests
+/// already recorded at `base_sha` are reused, and only the misses are actually
+/// run (stably). Newly-captured outcomes are written back and persisted. If the
+/// missing set is unstable the whole baseline is unusable (`None`), matching
+/// [`capture_stable`]. With every test cached, the runner is never invoked.
+pub fn capture_stable_cached(
+    runner: &dyn TestRunner,
+    ids: &[TestId],
+    ring: Ring,
+    cache: &mut BaselineCache,
+    base_sha: &str,
+) -> anyhow::Result<Option<Snapshot>> {
+    let (hits, misses) = cache.split(base_sha, ids);
+
+    let mut states: HashMap<TestId, TestOutcome> = hits.into_iter().collect();
+    let mut build_ok = true;
+
+    if !misses.is_empty() {
+        let Some(fresh) = capture_stable(runner, &misses, ring)? else {
+            return Ok(None); // unstable → unusable, do not cache noise
+        };
+        build_ok = fresh.build_ok;
+        for id in &misses {
+            if let Some(o) = fresh.get(id) {
+                states.insert(id.clone(), o);
+                cache.put(base_sha, id, o);
+            }
+        }
+        cache.save()?;
+    }
+
+    Ok(Some(Snapshot { states, build_ok, runs: 2 }))
 }
 
 /// The reproduce gate: every target must be red (Fail/Errored) at baseline.
@@ -89,6 +126,47 @@ mod tests {
             i: RefCell::new(0),
         };
         assert!(capture_stable(&runner, &ids(&["t"]), Ring::Inner).unwrap().is_none());
+    }
+
+    /// A runner that panics if asked to run — proves the cache path never calls it.
+    struct NeverRunner;
+    impl TestRunner for NeverRunner {
+        fn run(&self, _ids: &[TestId], _ring: Ring) -> anyhow::Result<Snapshot> {
+            panic!("runner must not be called when every test is cached")
+        }
+    }
+
+    #[test]
+    fn fully_cached_baseline_skips_the_runner() {
+        let mut cache = BaselineCache::in_memory();
+        cache.put("sha", "t1", Fail);
+        cache.put("sha", "t2", Pass);
+        let snap = capture_stable_cached(&NeverRunner, &ids(&["t1", "t2"]), Ring::Inner, &mut cache, "sha")
+            .unwrap()
+            .unwrap();
+        assert_eq!(snap.get("t1"), Some(Fail));
+        assert_eq!(snap.get("t2"), Some(Pass));
+    }
+
+    #[test]
+    fn cached_capture_runs_only_misses_and_backfills() {
+        // t1 cached; t2 must be run (twice, agreeing) then cached.
+        let runner = SeqRunner {
+            seq: vec![
+                Snapshot::from_pairs([("t2", Fail)]),
+                Snapshot::from_pairs([("t2", Fail)]),
+            ],
+            i: RefCell::new(0),
+        };
+        let mut cache = BaselineCache::in_memory();
+        cache.put("sha", "t1", Pass);
+        let snap = capture_stable_cached(&runner, &ids(&["t1", "t2"]), Ring::Inner, &mut cache, "sha")
+            .unwrap()
+            .unwrap();
+        assert_eq!(snap.get("t1"), Some(Pass));
+        assert_eq!(snap.get("t2"), Some(Fail));
+        // t2 got backfilled into the cache.
+        assert_eq!(cache.get("sha", "t2"), Some(Fail));
     }
 
     #[test]

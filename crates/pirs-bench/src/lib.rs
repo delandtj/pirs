@@ -7,6 +7,7 @@
 
 pub mod baseline;
 pub mod bootstrap;
+pub mod cache;
 pub mod command;
 pub mod detect;
 pub mod driver;
@@ -19,7 +20,8 @@ pub mod report;
 pub mod run;
 pub mod types;
 
-pub use baseline::{capture_stable, targets_reproduce};
+pub use baseline::{capture_stable, capture_stable_cached, targets_reproduce};
+pub use cache::BaselineCache;
 pub use bootstrap::{bootstrap, Bootstrap};
 pub use command::CommandRunner;
 pub use detect::{discover, DetectorHost, Discovery};
