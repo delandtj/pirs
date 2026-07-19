@@ -18,6 +18,7 @@ pirs-agent = { path = "../pirs-agent" }
 pirs-ai = { path = "../pirs-ai" }
 pirs-tools = { path = "../pirs-tools" }
 pirs-graph = { path = "../pirs-graph" }
+pirs-rhai = { path = "../pirs-rhai" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 anyhow = { workspace = true }

@@ -80,6 +80,20 @@ struct Common {
     /// Agent loop strategy. All are judged identically, so this is the A/B knob.
     #[arg(long, value_enum, default_value_t = StrategyKind::Monolithic, global = true)]
     strategy: StrategyKind,
+    /// Path to a user-authored strategy (`.rhai`). Overrides `--strategy`.
+    #[arg(long, global = true)]
+    strategy_script: Option<PathBuf>,
+}
+
+impl Common {
+    /// The loop strategy to run: a user script if `--strategy-script` is given,
+    /// otherwise the selected built-in.
+    fn strategy(&self) -> anyhow::Result<Strategy> {
+        match &self.strategy_script {
+            Some(path) => pirs_rhai::strategy_script::load_strategy_file(path),
+            None => Ok(self.strategy.into()),
+        }
+    }
 }
 
 /// CLI selector for the agent loop [`Strategy`].
@@ -204,6 +218,8 @@ struct SolveCtx<'a> {
     provider: &'a Provider,
     api_key: &'a str,
     host: &'a DetectorHost,
+    /// The resolved loop strategy (built-in or user script), reused per instance.
+    strategy: Strategy,
 }
 
 /// Run one instance through the full harness. Shared by `solve` and `batch`.
@@ -238,7 +254,7 @@ fn solve_one(
             api_key: ctx.api_key.to_string(),
             max_turns_per_attempt: ctx.common.max_turns,
             provider: build_provider(ctx.provider),
-            strategy: ctx.common.strategy.into(),
+            strategy: ctx.strategy.clone(),
         },
     )
     .context("build agent executor")?;
@@ -272,7 +288,8 @@ fn solve_one(
 }
 
 fn run_solve(a: SolveArgs) -> anyhow::Result<bool> {
-    eprintln!("strategy: {}", Strategy::from(a.common.strategy).name);
+    let strategy = a.common.strategy()?;
+    eprintln!("strategy: {}", strategy.name);
     let (provider, key) = a.common.provider.resolve()?;
     let issue = match (a.issue, a.issue_file) {
         (Some(s), _) => s,
@@ -286,6 +303,7 @@ fn run_solve(a: SolveArgs) -> anyhow::Result<bool> {
         provider: &provider,
         api_key: &key,
         host: &host,
+        strategy,
     };
 
     let job = Job {
@@ -312,7 +330,8 @@ fn run_solve(a: SolveArgs) -> anyhow::Result<bool> {
 }
 
 fn run_batch(a: BatchArgs) -> anyhow::Result<()> {
-    eprintln!("strategy: {}", Strategy::from(a.common.strategy).name);
+    let strategy = a.common.strategy()?;
+    eprintln!("strategy: {}", strategy.name);
     let (provider, key) = a.common.provider.resolve()?;
     let text = std::fs::read_to_string(&a.dataset)
         .with_context(|| format!("read dataset {:?}", a.dataset))?;
@@ -327,6 +346,7 @@ fn run_batch(a: BatchArgs) -> anyhow::Result<()> {
         provider: &provider,
         api_key: &key,
         host: &host,
+        strategy,
     };
     let mut attribution = Attribution::new();
     let mut timings = pirs_bench::Timings::new();
@@ -371,17 +391,16 @@ fn run_batch(a: BatchArgs) -> anyhow::Result<()> {
 }
 
 fn run_selftest(a: SelftestArgs) -> anyhow::Result<u8> {
-    if a.agent {
-        eprintln!("strategy: {}", Strategy::from(a.common.strategy).name);
-    }
     let mode = if a.agent {
+        let strategy = a.common.strategy()?;
+        eprintln!("strategy: {}", strategy.name);
         let (provider, api_key) = a.common.provider.resolve()?;
         selftest::Mode::Agent {
             provider,
             model: a.common.model.clone(),
             api_key,
             max_turns: a.common.max_turns,
-            strategy: a.common.strategy.into(),
+            strategy,
         }
     } else {
         selftest::Mode::Oracle

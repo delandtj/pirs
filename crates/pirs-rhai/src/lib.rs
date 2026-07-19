@@ -32,6 +32,7 @@ pub type SubagentRunner =
     Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>;
 
 pub mod caps;
+pub mod strategy_script;
 
 /// Immutable per-extension hook presence, hoisted OUT of `Mutex<Extension>` so
 /// dispatchers can tell whether an extension even has a hook without taking its

@@ -1474,6 +1474,7 @@ dependencies = [
  "pirs-ai",
  "pirs-bench",
  "pirs-graph",
+ "pirs-rhai",
  "pirs-tools",
  "serde",
  "serde_json",
