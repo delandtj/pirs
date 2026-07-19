@@ -16,7 +16,7 @@ pub mod run;
 pub mod types;
 
 pub use command::CommandRunner;
-pub use detect::DetectorHost;
+pub use detect::{discover, DetectorHost, Discovery};
 pub use gate::{evaluate, Verdict};
 pub use probe::{probe, ProbeResult};
 pub use report::Attribution;

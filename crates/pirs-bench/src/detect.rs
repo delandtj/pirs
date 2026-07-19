@@ -73,6 +73,17 @@ impl DetectorHost {
         DetectorHost { engine, detectors: Vec::new(), root }
     }
 
+    /// A host preloaded with the bundled, trusted detectors (pytest, go, rust),
+    /// embedded in the binary so there is no runtime file dependency and nothing
+    /// the task repo can influence.
+    pub fn with_bundled() -> anyhow::Result<Self> {
+        let mut host = Self::new();
+        host.load_detector("pytest", include_str!("../detectors/pytest.rhai"))?;
+        host.load_detector("go", include_str!("../detectors/go.rhai"))?;
+        host.load_detector("rust", include_str!("../detectors/rust.rhai"))?;
+        Ok(host)
+    }
+
     /// Compile and register a detector script (which must define `fn detect()`
     /// returning an array of spec maps). `name` is used only in diagnostics.
     pub fn load_detector(&mut self, name: &str, source: &str) -> anyhow::Result<()> {
@@ -129,6 +140,32 @@ impl DetectorHost {
     }
 }
 
+/// Outcome of runner discovery: the first probe-confirmed spec, or nothing
+/// confirmed (carrying the last failing probe's stderr as an env-repair hint).
+pub enum Discovery {
+    Confirmed { spec: RunnerSpec, listed: usize },
+    Unconfirmed { tried: usize, hint: String },
+}
+
+/// Detect candidate runners and return the first that probe-confirms. Candidates
+/// are tried in detector load order (trust order); a candidate whose probe fails
+/// contributes its stderr as the environment-repair hint if none confirm.
+pub fn discover(host: &DetectorHost, repo_root: &Path) -> anyhow::Result<Discovery> {
+    let specs = host.detect(repo_root);
+    let tried = specs.len();
+    let mut hint = String::new();
+    for spec in specs {
+        let p = crate::probe::probe(&spec, repo_root)?;
+        if p.confirmed {
+            return Ok(Discovery::Confirmed { spec, listed: p.listed });
+        }
+        if !p.stderr.trim().is_empty() {
+            hint = p.stderr;
+        }
+    }
+    Ok(Discovery::Unconfirmed { tried, hint })
+}
+
 /// Resolve a detector-supplied relative path against the current root, rejecting
 /// absolute paths and `..` escapes — defense in depth even for trusted scripts.
 fn resolve(root: &Arc<Mutex<PathBuf>>, rel: &str) -> Option<PathBuf> {
@@ -179,6 +216,60 @@ mod tests {
         let mut host = DetectorHost::new();
         host.load_detector("go", GO_DETECTOR).unwrap();
         assert!(host.detect(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn bundled_detectors_all_compile() {
+        // include_str! + compile: proves the shipped pytest/go/rust scripts parse.
+        DetectorHost::with_bundled().unwrap();
+    }
+
+    #[test]
+    fn bundled_pytest_detects_python_project() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname='x'\n").unwrap();
+        let host = DetectorHost::with_bundled().unwrap();
+        let specs = host.detect(dir.path());
+        let py = specs.iter().find(|s| s.framework == "pytest").expect("pytest spec");
+        assert!(py.test_cmd.contains("--junitxml={junit}"));
+        assert!(py.test_cmd.contains("{tests}"));
+    }
+
+    #[test]
+    fn discover_returns_first_confirmed_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = DetectorHost::new();
+        // One detector emitting a failing candidate first, a confirming one next.
+        host.load_detector(
+            "d",
+            r#"fn detect() {
+                [
+                  #{ framework: "bad",  install: [], list_cmd: "false",
+                     test_cmd: "true", timeout_secs: 5, parallel: false },
+                  #{ framework: "good", install: [], list_cmd: "printf 'a\nb\n'",
+                     test_cmd: "true", timeout_secs: 5, parallel: false },
+                ]
+            }"#,
+        )
+        .unwrap();
+        match discover(&host, dir.path()).unwrap() {
+            Discovery::Confirmed { spec, listed } => {
+                assert_eq!(spec.framework, "good");
+                assert_eq!(listed, 2);
+            }
+            Discovery::Unconfirmed { .. } => panic!("expected a confirmed runner"),
+        }
+    }
+
+    #[test]
+    fn discover_unconfirmed_when_nothing_probes() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = DetectorHost::with_bundled().unwrap();
+        // No project markers → no candidates → Unconfirmed.
+        match discover(&host, dir.path()).unwrap() {
+            Discovery::Unconfirmed { tried, .. } => assert_eq!(tried, 0),
+            Discovery::Confirmed { .. } => panic!("nothing should confirm on an empty dir"),
+        }
     }
 
     #[test]
