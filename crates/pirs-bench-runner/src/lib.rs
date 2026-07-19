@@ -12,18 +12,52 @@
 //! `pirs_rhai::ExtensionHost`. There is therefore no path by which the task
 //! repo's own `.pirs/extensions`, hooks, or MCP config load into this run.
 
+pub mod selftest;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use pirs_agent::agent_loop::{run_agent_loop, Budgets, LoopConfig};
 use pirs_agent::{AgentTool, Emit, ExecutionMode, Hooks};
 use pirs_ai::anthropic::AnthropicClient;
-use pirs_ai::{CompletionOptions, Context, LlmProvider, Message, Usage};
+use pirs_ai::{CompletionOptions, Context, LlmProvider, Message, OpenAiCompat, Usage};
 use pirs_bench::{Executor, GitWorkspace, Verdict};
 use pirs_graph::ast_edit::AstEditTool;
 use pirs_graph::code_map::CodeMapTool;
 use pirs_graph::LazyGraph;
 use tokio_util::sync::CancellationToken;
+
+/// Which LLM backend to drive the agent with.
+#[derive(Debug, Clone)]
+pub enum Provider {
+    /// Anthropic Messages API (default endpoint). Key: `ANTHROPIC_API_KEY`.
+    Anthropic,
+    /// Any OpenAI-compatible endpoint (DeepSeek, OpenAI, local servers) at
+    /// `base_url`. Key: provider-specific env, resolved by the caller.
+    OpenAiCompat { base_url: String, name: String },
+}
+
+impl Provider {
+    /// DeepSeek's OpenAI-compatible endpoint.
+    pub fn deepseek() -> Self {
+        Provider::OpenAiCompat {
+            base_url: "https://api.deepseek.com".to_string(),
+            name: "deepseek".to_string(),
+        }
+    }
+}
+
+/// Construct a concrete provider. Anthropic and OpenAI-compatible backends both
+/// implement [`LlmProvider`]; the API key travels per-request via
+/// `CompletionOptions`, not the constructor.
+pub fn build_provider(provider: &Provider) -> Arc<dyn LlmProvider> {
+    match provider {
+        Provider::Anthropic => Arc::new(AnthropicClient::new(None)),
+        Provider::OpenAiCompat { base_url, name } => {
+            Arc::new(OpenAiCompat::new(Some(base_url.clone())).with_provider_name(name.clone()))
+        }
+    }
+}
 
 /// Bench-mode system prompt: fix the code so the failing tests pass, minimally,
 /// and never by editing the tests themselves.
@@ -59,6 +93,7 @@ impl AgentExecutor {
     /// Build an executor rooted at `repo_root`. `issue` is the task/problem
     /// statement; `targets` are the failing test ids being fixed (used only to
     /// tell the agent what to make pass — the harness owns actual verification).
+    /// `provider` is any [`LlmProvider`] (see [`build_provider`]).
     pub fn new(
         repo_root: PathBuf,
         issue: String,
@@ -66,6 +101,7 @@ impl AgentExecutor {
         model: String,
         api_key: String,
         max_turns_per_attempt: usize,
+        provider: Arc<dyn LlmProvider>,
     ) -> anyhow::Result<Self> {
         let rt = Arc::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -79,8 +115,6 @@ impl AgentExecutor {
         let graph = Arc::new(LazyGraph::new(repo_root.clone()));
         tools.push(Arc::new(CodeMapTool::new(graph, repo_root.clone())));
         tools.push(Arc::new(AstEditTool::new(repo_root.clone())));
-
-        let provider: Arc<dyn LlmProvider> = Arc::new(AnthropicClient::new(None));
 
         let context = Context {
             system_prompt: Some(SYSTEM_PROMPT.to_string()),
