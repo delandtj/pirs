@@ -764,7 +764,16 @@ impl ExtensionHost {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("on_tool_call in {} failed: {e}", ext.path.display());
+                    // A policy hook is a security gate: a script error (bad args,
+                    // op-limit, thrown error) means the policy could not be
+                    // evaluated, so FAIL CLOSED — deny rather than silently run
+                    // the tool. Consistent with the busy-lock branch above.
+                    let path = ext.path.display().to_string();
+                    tracing::warn!("on_tool_call in {path} failed: {e}");
+                    self.record_error("on_tool_call", format!("{path}: {e}"));
+                    return Some(format!(
+                        "blocked: policy hook in {path} errored; cannot evaluate ({e})"
+                    ));
                 }
             }
         }
