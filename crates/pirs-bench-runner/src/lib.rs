@@ -147,8 +147,10 @@ impl AgentExecutor {
         tools.push(Arc::new(AstEditTool::new(repo_root.clone())));
 
         // Planner tools: everything that can't mutate the tree, so the plan phase
-        // localizes without editing. bash is excluded too (it can write via shell).
-        const MUTATING: &[&str] = &["edit", "write", "ast_edit", "bash"];
+        // localizes without editing. bash is excluded too (it can write via shell),
+        // and run_tests (it compiles and writes build artifacts) — running the
+        // suite is the executor's job, not the planner's.
+        const MUTATING: &[&str] = &["edit", "write", "ast_edit", "bash", "run_tests"];
         let planner_tools: Vec<Arc<dyn AgentTool>> = tools
             .iter()
             .filter(|t| !MUTATING.contains(&t.name()))

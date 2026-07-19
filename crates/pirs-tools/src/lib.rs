@@ -46,6 +46,7 @@ pub mod ls;
 pub mod paths;
 pub mod read;
 pub mod recall;
+pub mod run_tests;
 pub mod sandbox;
 pub mod truncate;
 pub mod write;
@@ -57,6 +58,7 @@ pub use grep::GrepTool;
 pub use ls::LsTool;
 pub use read::ReadTool;
 pub use recall::RecallTool;
+pub use run_tests::RunTestsTool;
 pub use write::WriteTool;
 
 pub fn default_tools(cwd: PathBuf) -> Vec<Arc<dyn AgentTool>> {
@@ -67,7 +69,8 @@ pub fn default_tools(cwd: PathBuf) -> Vec<Arc<dyn AgentTool>> {
         Arc::new(WriteTool::new(cwd.clone())),
         Arc::new(GrepTool::new(cwd.clone())),
         Arc::new(FindTool::new(cwd.clone())),
-        Arc::new(LsTool::new(cwd)),
+        Arc::new(LsTool::new(cwd.clone())),
+        Arc::new(RunTestsTool::new(cwd)),
         Arc::new(RecallTool::default()),
     ];
     for t in job_tools::tools() {
