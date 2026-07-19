@@ -268,15 +268,63 @@ fn collect_identifiers(
     }
 }
 
+/// The byte span of a function *including* the attributes, decorators, and doc
+/// comments bound to it. tree-sitter models these as the function's preceding
+/// siblings (Rust `#[attr]` / `///`) or as a wrapping `decorated_definition`
+/// (Python `@deco`); the bare `function_item`/`function_definition` node omits
+/// them. Moving that node alone drops them from the destination and orphans
+/// them in the source — an orphaned Python decorator is a syntax error.
+fn full_item_span(func: tree_sitter::Node, source: &str, lang: Lang) -> (usize, usize) {
+    if lang == Lang::Python {
+        if let Some(parent) = func.parent() {
+            if parent.kind() == "decorated_definition" {
+                return (parent.start_byte(), parent.end_byte());
+            }
+        }
+        return (func.start_byte(), func.end_byte());
+    }
+    // Rust: walk back over contiguous attribute / doc-comment siblings.
+    let mut start = func.start_byte();
+    let mut node = func;
+    while let Some(prev) = node.prev_sibling() {
+        let keep = match prev.kind() {
+            "attribute_item" => true,
+            "line_comment" | "block_comment" => {
+                let t = prev.utf8_text(source.as_bytes()).unwrap_or("");
+                t.starts_with("///")
+                    || t.starts_with("//!")
+                    || t.starts_with("/**")
+                    || t.starts_with("/*!")
+            }
+            _ => false,
+        };
+        if !keep {
+            break;
+        }
+        // A blank line between this sibling and the item below means it belongs
+        // to something else (or nothing), not to our function — stop there.
+        if source[prev.end_byte()..node.start_byte()].matches('\n').count() > 1 {
+            break;
+        }
+        start = prev.start_byte();
+        node = prev;
+    }
+    (start, func.end_byte())
+}
+
 fn move_function(src: &Path, dest: &Path, lang: Lang, name: &str) -> anyhow::Result<EditResult> {
     let source = std::fs::read_to_string(src)?;
     let tree = parse(lang, &source)?;
     let func = find_function(&tree, &source, lang, name)
         .with_context(|| format!("function '{name}' not found in {}", src.display()))?;
-    let text = func.utf8_text(source.as_bytes()).unwrap_or("").to_string();
+    let (span_start, span_end) = full_item_span(func, &source, lang);
+    let text = source[span_start..span_end].to_string();
+    let first_line = source[..span_start].matches('\n').count() + 1;
 
-    // Write the destination FIRST: if it fails, the source is untouched.
-    let mut dest_content = if dest.exists() {
+    // Write the destination FIRST: if it fails to parse, roll it back to its
+    // prior state and leave the source untouched.
+    let dest_existed = dest.exists();
+    let dest_original = if dest_existed {
         std::fs::read_to_string(dest)?
     } else {
         if let Some(parent) = dest.parent() {
@@ -284,6 +332,7 @@ fn move_function(src: &Path, dest: &Path, lang: Lang, name: &str) -> anyhow::Res
         }
         String::new()
     };
+    let mut dest_content = dest_original.clone();
     if !dest_content.is_empty() && !dest_content.ends_with('\n') {
         dest_content.push('\n');
     }
@@ -291,23 +340,39 @@ fn move_function(src: &Path, dest: &Path, lang: Lang, name: &str) -> anyhow::Res
     dest_content.push_str(text.trim_end());
     dest_content.push('\n');
     std::fs::write(dest, &dest_content)?;
-    reparse_check(dest, lang)?;
+    if let Err(e) = reparse_check(dest, lang) {
+        restore(dest, dest_existed, &dest_original);
+        return Err(e.context("edit rolled back"));
+    }
 
     let mut remaining = source.clone();
-    let end = if source.as_bytes().get(func.end_byte()) == Some(&b'\n') {
-        func.end_byte() + 1
+    let end = if source.as_bytes().get(span_end) == Some(&b'\n') {
+        span_end + 1
     } else {
-        func.end_byte()
+        span_end
     };
-    remaining.replace_range(func.start_byte()..end, "");
+    remaining.replace_range(span_start..end, "");
     std::fs::write(src, &remaining)?;
-
-    reparse_check(src, lang)?;
+    // If removing the item leaves the source unparseable, both files must be
+    // restored — the destination was already written above.
+    if let Err(e) = reparse_check(src, lang) {
+        let _ = std::fs::write(src, &source);
+        restore(dest, dest_existed, &dest_original);
+        return Err(e.context("edit rolled back"));
+    }
 
     Ok(EditResult {
         message: format!("Moved {name} from {} to {}", src.display(), dest.display()),
-        first_line: func.start_position().row + 1,
+        first_line,
     })
+}
+
+fn restore(path: &Path, existed: bool, original: &str) {
+    if existed {
+        let _ = std::fs::write(path, original);
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn line_of_byte(source: &str, byte: usize) -> usize {
@@ -403,6 +468,56 @@ mod tests {
         .unwrap();
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "fn keep() {}\n");
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "\nfn gone() { 1; }\n");
+    }
+
+    #[tokio::test]
+    async fn move_function_carries_rust_attributes_and_docs() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.rs");
+        let b = dir.path().join("b.rs");
+        std::fs::write(
+            &a,
+            "fn keep() {}\n/// docs for gone\n#[inline]\nfn gone() { 1; }\n",
+        )
+        .unwrap();
+        run(
+            &tool(dir.path()),
+            json!({"op": "move_function", "path": "a.rs", "name": "gone", "value": "b.rs"}),
+        )
+        .await
+        .unwrap();
+        // The attribute and doc comment travel with the function; the source is
+        // left with neither orphaned.
+        let a_after = std::fs::read_to_string(&a).unwrap();
+        assert_eq!(a_after, "fn keep() {}\n");
+        let b_after = std::fs::read_to_string(&b).unwrap();
+        assert!(b_after.contains("/// docs for gone"), "docs: {b_after:?}");
+        assert!(b_after.contains("#[inline]"), "attr: {b_after:?}");
+        assert!(b_after.contains("fn gone() { 1; }"));
+    }
+
+    #[tokio::test]
+    async fn move_function_carries_python_decorators() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.py");
+        let b = dir.path().join("b.py");
+        std::fs::write(
+            &a,
+            "def keep():\n    pass\n\n@staticmethod\ndef gone():\n    return 1\n",
+        )
+        .unwrap();
+        run(
+            &tool(dir.path()),
+            json!({"op": "move_function", "path": "a.py", "name": "gone", "value": "b.py"}),
+        )
+        .await
+        .unwrap();
+        // Neither file may end up with an orphaned decorator (a syntax error).
+        let a_after = std::fs::read_to_string(&a).unwrap();
+        assert!(!a_after.contains("@staticmethod"), "orphaned: {a_after:?}");
+        let b_after = std::fs::read_to_string(&b).unwrap();
+        assert!(b_after.contains("@staticmethod"), "decorator: {b_after:?}");
+        assert!(b_after.contains("def gone():"));
     }
 
     #[tokio::test]
