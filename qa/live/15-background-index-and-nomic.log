@@ -1,0 +1,68 @@
+Live proof — background embedding indexer + nomic-embed-text quality
+=====================================================================
+
+Machine: this box embeds ~0.5s per real 1024-char code chunk via local Ollama
+(measured: 30.5s for a batch of 64). A full 2137-symbol index is minutes of
+work, so it MUST run off the search path and survive restarts.
+
+--------------------------------------------------------------------
+(b) BACKGROUND INDEXER — fills the index behind BM25, checkpointed
+--------------------------------------------------------------------
+Started `pirs --mode repl --semantic --embed-model nomic-embed-text
+--embed-max-chars 512` and left it idle. code_search is query-only (embed_cap
+= 0); a background task fills the embedding index in batches of 64, persisting
+each batch before the next. The repl stayed fully responsive throughout.
+
+Observed embedding count climbing while the process idled (nothing blocked):
+  t+25s   64
+  t+50s   320
+  t+75s   448
+  t+100s  576
+  t+125s  768
+  ...     1024, 1152, 1280, 1472, 1536, 1728, 1920
+  ~7 min  2137  (FULL — every code symbol embedded)
+
+Killed the host; the 2137 vectors persisted in .pirs/graph.db (survives
+restart). Resumability + no-rework-on-restart are test-pinned:
+  crates/pirs-graph/tests/bg_index_test.rs
+    - fills_whole_index_behind_the_search_path (each symbol embedded once)
+    - resumes_after_kill_without_reembedding   (run 2 embeds ONLY the remainder)
+
+This is the fix for the old inline path, which stored only at the very end:
+a kill at 7.5 min there persisted ZERO vectors. Here, a kill loses at most the
+one in-flight batch.
+
+--------------------------------------------------------------------
+(a) NOMIC-EMBED-TEXT QUALITY — honest comparison vs all-minilm
+--------------------------------------------------------------------
+Same two queries as the all-minilm runs. Results are FUSED
+[lexical+semantic+graph], so BM25 contributes to both.
+
+Q1 "decide whether a source file has changed and needs re-parsing ... staleness":
+  1. load_source (crates/pirs-rhai/src/lib.rs:447)  [30 callers]
+  2. incremental_refresh_equals_full_parse_across_add_change_delete (store_test.rs:54)
+  3. first_changed_line (crates/pirs-tools/src/edit.rs:281)
+  4. on_tool_result_records_only_source_files (mutation_guard_test.rs:81)
+  5. refresh (crates/pirs-graph/src/store.rs:108)  [5 callers]   <- the real answer, #5
+
+Q2 "change what an already-running agent turn is doing without stopping it":
+  1. run_turn (crates/pirs/src/main.rs:1203)
+  2. run_agent_loop (crates/pirs-agent/src/agent_loop.rs:66)
+  3. run_strategy_turn (crates/pirs/src/main.rs:1281)
+  4. on_should_stop_ends_loop_after_turn (loop_hooks_test.rs:131)
+  5. turn_end_event_carries_usage (packs2_test.rs:266)
+  -> NONE are the steering mechanism (steer / job_steer / agent.steer). It
+     clustered on "run turn / loop" and missed the actual concept.
+
+VERDICT: nomic-embed-text is NOT meaningfully better than all-minilm here.
+  - Q1: comparable — the real function `refresh` shows at #5, the incremental
+    test at #2, but much of that is BM25 matching "re-parsing"/"incremental",
+    not the embedding.
+  - Q2: still weak — neither general model maps "change a running turn" to the
+    domain term "steer".
+Both are GENERAL text models despite the name; the quality lever is a
+CODE-SPECIFIC embedder (nomic-embed-code, jina-code, voyage-code-3), not a
+bigger general model. The infrastructure (background index, service client)
+is now ready to consume one; the model is a config choice via --embed-model.
+
+(API key scrubbed; no key appears in this log or the raw captures.)

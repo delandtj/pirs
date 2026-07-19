@@ -10,7 +10,7 @@ the real secret); no keys or secrets are committed.
 
 | Gate | Proof | Result |
 |------|-------|--------|
-| Full test suite | `test-suite.txt` | **505 passed, 0 failed** |
+| Full test suite | `test-suite.txt` | **507 passed, 0 failed** |
 | Formatting | `fmt.txt` | clean (`cargo fmt --check`, exit 0) |
 | Lint | `clippy.txt` | clean (`clippy -D warnings`, exit 0) |
 | CLI surface | `cli-help.txt` | `--help` renders all flags |
@@ -76,16 +76,24 @@ fusion (RRF, k=60): **BM25 lexical** (tantivy, in-RAM), **embedding cosine**
 (optional, OpenAI-compatible service, no native ONNX dep), and **graph
 centrality** (caller count). BM25 needs no model and builds instantly, so the
 tool works the moment the graph exists; it registers whenever the graph is on.
-The embedding arm activates under `--semantic` + `--embed-model`, is bounded
-(`--embed-batch-cap`, default 256 symbols/call, persisted), and degrades
-silently to lexical+graph if the service is down or the index is empty.
+The embedding arm activates under `--semantic` + `--embed-model`. By default a
+**background indexer** fills the embedding index off the search path (BM25
+answers instantly; semantic hits light up as vectors land), checkpointing every
+batch so a restart resumes instead of re-embedding. `--embed-batch-cap N` opts
+into synchronous inline indexing for a one-shot. Either way it degrades silently
+to lexical+graph if the service is down or the index is empty.
 
 | # | Feature | Proof | What it demonstrates |
 |---|---------|-------|----------------------|
 | 13 | `semantic_search` (embedding-only, superseded) | `live/13-semantic-search.log` | Historical: the original embedding-only tool on `all-minilm` returned plausible-but-wrong hits (`diff`/`not_found_error`) for a staleness query — the weakness that motivated the hybrid. |
 | 14 | `code_search` hybrid (BM25+embeddings+graph) | `live/14-code-search-hybrid.log` | On the pirs repo, `all-minilm` embedded **all 2124 symbols**; the tool reports `[lexical+semantic+graph]`. **Same query as #13** now ranks the real incremental-refresh/staleness symbol #1. An exact-identifier query returns `store_embeddings`/`ensure_model`/model-guard test as ranks 1-3 — BM25's exact-term strength that cosine alone lacked. |
+| 15 | Background indexer + nomic quality | `live/15-background-index-and-nomic.log` | An idle `repl` built the full **2137-symbol** `nomic-embed-text` index in the background (64→2137 in ~7 min) while staying responsive; count persisted across a kill. **Honest finding:** nomic-embed-text is *not* meaningfully better than all-minilm on these queries — both are general models; the steering query still misses `steer`. Confirms a code-specific embedder is the real quality lever. |
 
 Correctness/robustness is also test-pinned:
+- `crates/pirs-graph/tests/bg_index_test.rs` — the background indexer fills the
+  whole index off the search path (each symbol embedded exactly once), and a
+  kill mid-build resumes from the last checkpoint (run 2 embeds only the
+  remainder, never a full re-index).
 - `crates/pirs-ai/tests/embed_client_test.rs` — the embeddings client parses
   responses, realigns out-of-order indexes, rejects count mismatches, surfaces
   non-2xx as errors.
@@ -103,10 +111,13 @@ Correctness/robustness is also test-pinned:
 
 **Honest quality note.** The hybrid closes most of the gap the embedding-only
 tool had on `all-minilm`: BM25 anchors exact terms and identifiers, so a weak
-general-English embedding model no longer sinks a query. A code-specific
-embedding model (nomic-embed-code, jina-code) would still lift the *semantic*
-arm further for purely conceptual queries — a model choice exposed via
-`--embed-model`, not a wiring gap.
+general embedding model no longer sinks a query. We then *tested* a bigger
+general model (`nomic-embed-text`, 768-dim) end to end (#15) — it was **not**
+meaningfully better; both are general text models and both miss domain-term
+concepts (a "steer the running turn" query surfaces `run_turn`, never `steer`).
+The real quality lever is a **code-specific** embedder (nomic-embed-code,
+jina-code, voyage-code-3), exposed via `--embed-model`; the background indexer
+and service client are ready to consume one. Not a wiring gap — a model choice.
 
 ## Discovery
 
@@ -121,4 +132,4 @@ arm further for purely conceptual queries — a model choice exposed via
   overrides and additions (e.g. `plan-oracle-exec`, `general-*`) resolve by name
   with project-then-home precedence.
 - The extension packs are cataloged in `../extensions/README.md` and loaded by
-  the `pirs-rhai` integration tests, counted in the 505 above.
+  the `pirs-rhai` integration tests, counted in the 507 above.

@@ -1,1 +1,7 @@
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.29s
+    Checking pirs-agent v0.1.0 (/home/xmonader/wspace/k3play/pirs/crates/pirs-agent)
+    Checking pirs-rhai v0.1.0 (/home/xmonader/wspace/k3play/pirs/crates/pirs-rhai)
+    Checking pirs-graph v0.1.0 (/home/xmonader/wspace/k3play/pirs/crates/pirs-graph)
+    Checking pirs-bench-runner v0.1.0 (/home/xmonader/wspace/k3play/pirs/crates/pirs-bench-runner)
+    Checking pirs-bench v0.1.0 (/home/xmonader/wspace/k3play/pirs/crates/pirs-bench)
+    Checking pirs v0.1.0 (/home/xmonader/wspace/k3play/pirs/crates/pirs)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.96s

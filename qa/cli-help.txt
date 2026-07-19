@@ -53,7 +53,7 @@ Options:
       --embed-max-chars <EMBED_MAX_CHARS>
           Max source chars embedded per symbol. Lower it for small-context models (e.g. 512 for all-minilm) to avoid the truncating fallback; big-context models can leave the default [env: PIRS_EMBED_MAX_CHARS] [env: PIRS_EMBED_MAX_CHARS=]
       --embed-batch-cap <EMBED_BATCH_CAP>
-          Max symbols code_search embeds per call (default 256). Keeps a first search from blocking on a full cold index; raise it to index everything in one pass with a fast model [env: PIRS_EMBED_BATCH_CAP] [env: PIRS_EMBED_BATCH_CAP=]
+          Opt into SYNCHRONOUS inline embedding instead of the default background indexer: code_search embeds up to N symbols per call (and no background task runs). Useful for a one-shot that must build the index in-process. By default, indexing runs in the background and searches never block [env: PIRS_EMBED_BATCH_CAP=]
       --tool-diet
           Start with only core tools loaded; model loads more via use_tool
       --sequential
