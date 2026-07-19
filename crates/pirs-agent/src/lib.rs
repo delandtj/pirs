@@ -7,6 +7,7 @@ pub mod jobs;
 pub mod memory;
 pub mod strategy;
 pub mod tool;
+pub mod trace;
 pub mod usage;
 pub mod use_tool;
 pub mod validate;
