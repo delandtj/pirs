@@ -69,6 +69,38 @@ incrementally-refreshed graph is set-equivalent to a from-scratch parse across
 adds, changes, and deletes; `corrupt_db_is_recreated_not_fatal` proves a garbage
 cache is wiped and rebuilt rather than breaking the agent.
 
+## Semantic code search (`--semantic`)
+
+Natural-language retrieval over the code graph via an OpenAI-compatible
+embedding service (no native ONNX dep in pirs). Embeddings are stored per-symbol
+in the graph store, stamped with the model so a swap re-embeds.
+
+| # | Feature | Proof | What it demonstrates |
+|---|---------|-------|----------------------|
+| 13 | `semantic_search` end to end | `live/13-semantic-search.log` | On the pirs repo, pointed at a local Ollama `all-minilm`: the tool embedded **2107 symbols**, cosine-searched a natural-language query, reranked by graph centrality, and returned ranked `file:line` hits with similarity + caller counts. |
+
+Correctness/robustness is also test-pinned:
+- `crates/pirs-ai/tests/embed_client_test.rs` — the embeddings client parses
+  responses, realigns out-of-order indexes, rejects count mismatches, surfaces
+  non-2xx as errors.
+- `crates/pirs-graph/tests/store_test.rs::semantic_embed_store_search_and_model_guard`
+  — embed/store/search ranking, the model-swap wipe guard, incremental re-embed
+  on file change.
+- `crates/pirs-graph/tests/semantic_fallback_test.rs` — **a bug this live run
+  caught**: small-context models (all-minilm, 256 tokens) reject dense chunks.
+  The fix truncates the offending chunk per-item so one oversized symbol never
+  aborts the whole index; the test drives the real tool against a mock server
+  that 400s over-long inputs and asserts both symbols still embed.
+
+**Honest quality note.** The *mechanism* is proven, but retrieval *quality* is
+model-bound. `all-minilm` is a tiny general-English model and is weak on code:
+in the live run its top hits for a "detect file changed / staleness" query were
+`diff`/`edit` symbols, not the store's actual `refresh()`/mtime logic. Semantic
+search is a better *first hop* into the graph, not a substitute for it — and a
+code-specific embedding model (e.g. nomic-embed-code, jina-code) is needed for
+results good enough to lead exploration. That is a model choice, exposed via
+`--embed-model`, not a wiring gap.
+
 ## Discovery
 
 | Feature | Proof | What it demonstrates |

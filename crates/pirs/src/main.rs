@@ -138,6 +138,12 @@ struct Cli {
     #[arg(long, env = "PIRS_EMBED_API_KEY")]
     embed_api_key: Option<String>,
 
+    /// Max source chars embedded per symbol. Lower it for small-context models
+    /// (e.g. 512 for all-minilm) to avoid the truncating fallback; big-context
+    /// models can leave the default [env: PIRS_EMBED_MAX_CHARS]
+    #[arg(long, env = "PIRS_EMBED_MAX_CHARS")]
+    embed_max_chars: Option<usize>,
+
     /// Start with only core tools loaded; model loads more via use_tool
     #[arg(long)]
     tool_diet: bool,
@@ -619,6 +625,7 @@ async fn main() -> anyhow::Result<()> {
                             cwd.clone(),
                             graph_db.clone(),
                             embedder,
+                            cli.embed_max_chars,
                         ));
                     tools.push(sem.clone());
                     sub_tools.push(sem);

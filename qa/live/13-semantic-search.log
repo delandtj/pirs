@@ -1,0 +1,20 @@
+The user wants me to use semantic_search exactly once with a natural-language query about incremental indexing / staleness detection / change detection for source files. Let me formulate a good query.
+> semantic_search 
+- (embedded 2107 new symbols)
+Top 8 for "decide whether a source file has changed and needs re-parsing for incremental indexing or staleness detection":
+1. diff (crates/pirs-bench/src/git.rs:63)  [sim 0.48, 3 callers]
+2. not_found_error (crates/pirs-tools/src/edit.rs:211)  [sim 0.44, 1 callers]
+3. diff_captures_edits_then_reset_reverts_them (crates/pirs-bench/src/git.rs:130)  [sim 0.40, 0 callers]
+4. attempt (crates/pirs-bench/tests/e2e_pytest.rs:33)  [sim 0.37, 2 callers]
+The user asked me to report the top file:line results verbatim. Let me present them as returned.Here are the top 8 results verbatim from the semantic search:
+
+1. **diff** (`crates/pirs-bench/src/git.rs:63`) — sim 0.48, 3 callers
+2. **not_found_error** (`crates/pirs-tools/src/edit.rs:211`) — sim 0.44, 1 callers
+3. **diff_captures_edits_then_reset_reverts_them** (`crates/pirs-bench/src/git.rs:130`) — sim 0.40, 0 callers
+4. **attempt** (`crates/pirs-bench/tests/e2e_pytest.rs:33`) — sim 0.37, 2 callers
+5. **attempt** (`crates/pirs-bench-runner/src/selftest.rs:79`) — sim 0.37, 2 callers
+6. **cands** (`crates/pirs-bench/src/orchestrate.rs:209`) — sim 0.34, 5 callers
+7. **read_cached** (`crates/pirs-tools/src/read.rs:29`) — sim 0.37, 1 callers
+8. **description** (`crates/pirs-tools/src/edit.rs:47`) — sim 0.35, 3 callers
+
+The strongest hit is the `diff` function in `crates/pirs-bench/src/git.rs` at line 63, which is likely where file-change detection (diffing) happens. The `read_cached` symbol in `crates/pirs-tools/src/read.rs:29` and the test `diff_captures_edits_then_reset_reverts_them` in `git.rs:130` are related follow-ups.

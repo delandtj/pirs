@@ -23,9 +23,11 @@ use serde_json::Value;
 
 use crate::store::{GraphStore, SemanticHit};
 
-/// How many source chars of a symbol to embed (keeps a giant function under the
-/// model's token limit).
-const MAX_CHUNK_CHARS: usize = 2000;
+/// Default source chars of a symbol to embed. Large enough for big-context
+/// models (e.g. nomic-embed-text, 2048 tokens); small-context models (e.g.
+/// all-minilm, 256 tokens) are handled by the per-item truncating fallback, so
+/// no model-specific tuning is required. Override with --embed-max-chars.
+const DEFAULT_MAX_CHUNK_CHARS: usize = 2000;
 /// Batch size for embedding requests.
 const EMBED_BATCH: usize = 64;
 
@@ -43,6 +45,7 @@ pub struct SemanticSearchTool {
     root: PathBuf,
     db_path: PathBuf,
     embedder: EmbeddingClient,
+    max_chars: usize,
 }
 
 impl SemanticSearchTool {
@@ -51,12 +54,14 @@ impl SemanticSearchTool {
         root: PathBuf,
         db_path: PathBuf,
         embedder: EmbeddingClient,
+        max_chars: Option<usize>,
     ) -> Self {
         SemanticSearchTool {
             graph,
             root,
             db_path,
             embedder,
+            max_chars: max_chars.unwrap_or(DEFAULT_MAX_CHUNK_CHARS),
         }
     }
 
@@ -70,22 +75,73 @@ impl SemanticSearchTool {
             let mut store = GraphStore::open(&self.db_path, &self.root)?;
             store.refresh()?;
             store.ensure_model(self.embedder.model(), dim)?;
-            store.pending_embeddings(MAX_CHUNK_CHARS)?
+            store.pending_embeddings(self.max_chars)?
         };
         if pending.is_empty() {
             return Ok(0);
         }
-        // Async phase: embed in batches (no connection held).
-        let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(pending.len());
-        for chunk in pending.chunks(EMBED_BATCH) {
-            let texts: Vec<String> = chunk.iter().map(|i| i.text.clone()).collect();
-            let embedded = self.embedder.embed(&texts).await?;
-            vectors.extend(embedded);
-        }
+        // Async phase: embed resiliently (no connection held). Items that survive
+        // are kept aligned with their vectors; ones that can't be embedded even
+        // after truncation are skipped (they stay pending, retried next call).
+        let (kept_idx, vectors) = self.embed_pending(&pending).await;
+        let kept: Vec<_> = kept_idx.iter().map(|&i| pending[i].clone()).collect();
         // Sync phase: persist.
         let mut store = GraphStore::open(&self.db_path, &self.root)?;
-        store.store_embeddings(&pending, &vectors)?;
-        Ok(pending.len())
+        store.store_embeddings(&kept, &vectors)?;
+        Ok(kept.len())
+    }
+
+    /// Embed all pending items, batched. If a batch is rejected (typically a
+    /// single dense chunk exceeding the model's context), fall back to embedding
+    /// that batch item by item, halving any offender until it fits — so one
+    /// oversized symbol never aborts the whole index. Returns the indices that
+    /// were embedded and their vectors, parallel.
+    async fn embed_pending(
+        &self,
+        pending: &[crate::store::EmbedItem],
+    ) -> (Vec<usize>, Vec<Vec<f32>>) {
+        let mut idxs = Vec::new();
+        let mut vecs = Vec::new();
+        for (b, chunk) in pending.chunks(EMBED_BATCH).enumerate() {
+            let base = b * EMBED_BATCH;
+            let texts: Vec<String> = chunk.iter().map(|i| i.text.clone()).collect();
+            match self.embedder.embed(&texts).await {
+                Ok(v) => {
+                    for (j, vec) in v.into_iter().enumerate() {
+                        idxs.push(base + j);
+                        vecs.push(vec);
+                    }
+                }
+                Err(_) => {
+                    for (j, item) in chunk.iter().enumerate() {
+                        if let Some(vec) = self.embed_one(&item.text).await {
+                            idxs.push(base + j);
+                            vecs.push(vec);
+                        }
+                    }
+                }
+            }
+        }
+        (idxs, vecs)
+    }
+
+    /// Embed one text, halving it on each failure until it fits the model's
+    /// context or gets too small to be worth keeping.
+    async fn embed_one(&self, text: &str) -> Option<Vec<f32>> {
+        let mut t = text.to_string();
+        for _ in 0..6 {
+            match self.embedder.embed(std::slice::from_ref(&t)).await {
+                Ok(mut v) => return v.pop(),
+                Err(_) => {
+                    let n = t.chars().count();
+                    if n <= 64 {
+                        return None;
+                    }
+                    t = t.chars().take(n / 2).collect();
+                }
+            }
+        }
+        None
     }
 
     /// Blend cosine similarity with graph centrality (caller count) over the
