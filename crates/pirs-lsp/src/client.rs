@@ -214,7 +214,7 @@ impl LspClient {
     }
 
     async fn initialize(&self, root: &std::path::Path) -> anyhow::Result<()> {
-        let root_uri = format!("file://{}", root.canonicalize()?.display());
+        let root_uri = uri_for(&root.canonicalize()?);
         self.request(
             "initialize",
             json!({
@@ -381,7 +381,7 @@ impl LspClient {
                         if let Some(uri) =
                             params.pointer("/textDocument/uri").and_then(|u| u.as_str())
                         {
-                            let path = std::path::PathBuf::from(uri.trim_start_matches("file://"));
+                            let path = path_from_uri(uri);
                             let lang = crate::client::server_for_file(&path)
                                 .map(|s| s.language)
                                 .unwrap_or("plaintext");
@@ -430,7 +430,22 @@ impl LspClient {
 
 fn uri_for(path: &std::path::Path) -> String {
     let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    format!("file://{}", abs.display())
+    // Percent-encode via url so paths with spaces, '#', '%', or non-ASCII
+    // produce a valid RFC 3986 file URI instead of a malformed string the LSP
+    // server rejects or mis-parses. Falls back to the raw form only if the
+    // path isn't absolute (url requires that).
+    url::Url::from_file_path(&abs)
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| format!("file://{}", abs.display()))
+}
+
+/// Inverse of `uri_for`: decode a `file://` URI back to a path, undoing the
+/// percent-encoding. Falls back to a literal strip for non-URL inputs.
+fn path_from_uri(uri: &str) -> std::path::PathBuf {
+    url::Url::parse(uri)
+        .ok()
+        .and_then(|u| u.to_file_path().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri)))
 }
 
 async fn read_message(
@@ -468,10 +483,10 @@ async fn read_message(
 
 pub fn format_location(loc: &Value, root: &std::path::Path) -> Option<String> {
     let uri = loc.get("uri").and_then(|u| u.as_str())?;
-    let path = uri.strip_prefix("file://").unwrap_or(uri);
-    let rel = std::path::Path::new(path)
+    let path = path_from_uri(uri);
+    let rel = path
         .strip_prefix(root)
-        .unwrap_or(std::path::Path::new(path))
+        .unwrap_or(&path)
         .to_string_lossy()
         .to_string();
     let line = loc
@@ -480,4 +495,40 @@ pub fn format_location(loc: &Value, root: &std::path::Path) -> Option<String> {
         .unwrap_or(0)
         + 1;
     Some(format!("{rel}:{line}"))
+}
+
+#[cfg(test)]
+mod uri_tests {
+    use super::{path_from_uri, uri_for};
+    use serde_json::json;
+
+    #[test]
+    fn special_char_paths_roundtrip_through_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory name with a space and a '#' — both invalid raw in a URI.
+        let sub = dir.path().join("my code #1");
+        std::fs::create_dir(&sub).unwrap();
+        let file = sub.join("a b.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        let uri = uri_for(&file);
+        assert!(uri.starts_with("file://"), "uri: {uri}");
+        assert!(uri.contains("%20"), "space must be percent-encoded: {uri}");
+        assert!(!uri.contains(' '), "no raw spaces in uri: {uri}");
+
+        let decoded = path_from_uri(&uri);
+        assert_eq!(decoded, file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn format_location_decodes_encoded_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a b.rs");
+        std::fs::write(&file, "x").unwrap();
+        let uri = uri_for(&file);
+        let loc = json!({"uri": uri, "range": {"start": {"line": 4}}});
+        let out = super::format_location(&loc, dir.path()).unwrap();
+        // Relative path is decoded (real space), line is 1-based.
+        assert_eq!(out, "a b.rs:5");
+    }
 }
