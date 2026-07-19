@@ -3,6 +3,7 @@ pub mod agent_loop;
 pub mod compaction;
 pub mod delegate;
 pub mod events;
+pub mod gate;
 pub mod jobs;
 pub mod memory;
 pub mod phase_agent;

@@ -72,6 +72,18 @@ struct Cli {
     #[arg(long)]
     profile: Option<String>,
 
+    /// Shell command that verifies a strategy attempt succeeded (exit 0 = pass,
+    /// e.g. "cargo test" or "pytest -x"). On failure its output is fed into the
+    /// next attempt as the prior verdict, so the strategy re-plans against the
+    /// real error. Only used with --strategy/--profile.
+    #[arg(long)]
+    verify: Option<String>,
+
+    /// Max strategy attempts when --verify is set (retry on gate failure).
+    /// Defaults to 3 with --verify, 1 otherwise.
+    #[arg(long)]
+    max_attempts: Option<u32>,
+
     /// Disable rhai extension loading
     #[arg(long)]
     no_extensions: bool,
@@ -1023,7 +1035,7 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(prompt) = cli.prompt.first().cloned() {
         if strategy_mode {
-            let report = run_strategy_turn(
+            let (report, passed) = run_strategy_turn(
                 &agent,
                 &prompt,
                 cli.strategy.as_deref(),
@@ -1031,10 +1043,17 @@ async fn main() -> anyhow::Result<()> {
                 &cli.model,
                 strategy_tools,
                 &cwd,
+                cli.verify.as_deref(),
+                cli.max_attempts,
             )
             .await?;
             eprintln!();
             print_usage(&report);
+            // A --verify gate that never passed exits non-zero so scripts/CI can
+            // tell a green run from a red one.
+            if cli.verify.is_some() && !passed {
+                std::process::exit(1);
+            }
             return Ok(());
         }
         run_turn(
@@ -1113,11 +1132,42 @@ async fn run_turn(
 /// newly added mutating tool can never silently leak into a planner's scope.
 const READONLY_PHASE_TOOLS: &[&str] = &["read", "grep", "find", "ls", "recall", "code_map", "lsp"];
 
-/// Run a one-shot prompt through a loop strategy/profile on the real agent.
+/// Run a shell verification command in `cwd`. Returns `(passed, output_tail)`;
+/// the last 4000 chars of combined stdout+stderr (errors cluster at the end) are
+/// what feeds the next attempt's verdict.
+async fn run_verify_command(cmd: String, cwd: PathBuf) -> (bool, String) {
+    let result = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .current_dir(&cwd)
+            .output()
+    })
+    .await;
+    match result {
+        Ok(Ok(out)) => {
+            let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+            combined.push_str(&String::from_utf8_lossy(&out.stderr));
+            let tail: String = {
+                let n = combined.chars().count();
+                combined.chars().skip(n.saturating_sub(4000)).collect()
+            };
+            (out.status.success(), tail)
+        }
+        Ok(Err(e)) => (false, format!("failed to run verify command: {e}")),
+        Err(e) => (false, format!("verify task panicked: {e}")),
+    }
+}
+
+/// Run a one-shot prompt through a loop strategy/profile on the real agent, with
+/// an optional verify-and-retry gate.
 ///
 /// Each phase forks the fully wired `base` agent (same hooks, listeners, session
-/// persistence, completion), re-scoped to the phase's tools and model. Returns a
-/// usage report spanning every phase so cost is reported for the whole run.
+/// persistence, completion), re-scoped to the phase's tools and model. When
+/// `verify` is set, the whole strategy re-runs (up to `max_attempts`, default 3)
+/// with the failing command's output fed back as the next attempt's verdict.
+/// Returns a usage report spanning every phase of every attempt.
+#[allow(clippy::too_many_arguments)]
 async fn run_strategy_turn(
     base: &Agent,
     input: &str,
@@ -1126,10 +1176,15 @@ async fn run_strategy_turn(
     default_model: &str,
     full_tools: Vec<Arc<dyn AgentTool>>,
     cwd: &Path,
-) -> anyhow::Result<pirs_agent::usage::UsageReport> {
+    verify: Option<&str>,
+    max_attempts: Option<u32>,
+) -> anyhow::Result<(pirs_agent::usage::UsageReport, bool)> {
+    use pirs_agent::gate::{run_gated, GateOutcome};
     use pirs_agent::phase_agent::AgentPhaseDriver;
     use pirs_agent::profile::Profile;
     use pirs_agent::strategy::{run_strategy_async, PhaseReq, Strategy, Task, ToolScope};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     // Effective profile: a neutral wrapper when only --strategy is given. A
     // --strategy always overrides which strategy the profile runs, keeping the
@@ -1146,55 +1201,91 @@ async fn run_strategy_turn(
     let strategy = profile.resolved_strategy();
     let policy = profile.tools.clone();
 
+    // Retry only makes sense with a gate; default to 3 attempts when verifying.
+    let attempts = max_attempts.unwrap_or(if verify.is_some() { 3 } else { 1 });
+
     eprintln!(
-        "[strategy '{}' · {} step(s){}]",
+        "[strategy '{}' · {} step(s){}{}]",
         strategy.name,
         strategy.steps.len(),
         profile_arg
             .map(|p| format!(" · profile '{p}'"))
             .unwrap_or_default(),
+        verify
+            .map(|_| format!(" · verify (≤{attempts} attempts)"))
+            .unwrap_or_default(),
     );
 
-    let task = Task {
-        issue: input.to_string(),
-        targets: Vec::new(),
-        verdict: None,
+    // All phases of all attempts accumulate here for one run-wide usage report.
+    let all_messages: Rc<RefCell<Vec<Message>>> = Rc::new(RefCell::new(Vec::new()));
+    let default_model = default_model.to_string();
+    let strategy_ref = &strategy;
+    let policy_ref = &policy;
+    let tools_ref = &full_tools;
+    let model_ref = default_model.as_str();
+
+    // One strategy attempt: a fresh driver seeded with the prior failure verdict.
+    let attempt = |verdict: Option<String>| {
+        let all_messages = Rc::clone(&all_messages);
+        async move {
+            let mut driver = AgentPhaseDriver::new(|req: &PhaseReq| {
+                // Profile tool policy first (a role can forbid tools entirely),
+                // then the phase's read/write scope narrows a planner to nav-only.
+                let mut scoped: Vec<Arc<dyn AgentTool>> = tools_ref
+                    .iter()
+                    .filter(|t| policy_ref.permits(t.name()))
+                    .cloned()
+                    .collect();
+                if req.scope == ToolScope::ReadOnly {
+                    scoped.retain(|t| READONLY_PHASE_TOOLS.contains(&t.name()));
+                }
+                let model = req.model.clone().unwrap_or_else(|| model_ref.to_string());
+                eprintln!(
+                    "\n\x1b[2m── phase {} · model {} · {}\x1b[0m",
+                    req.phase_id,
+                    model,
+                    if req.scope == ToolScope::ReadOnly {
+                        "read-only"
+                    } else {
+                        "full"
+                    },
+                );
+                base.fork_for_phase(req.system.clone(), model, scoped)
+            });
+            let task = Task {
+                issue: input.to_string(),
+                targets: Vec::new(),
+                verdict,
+            };
+            let r = run_strategy_async(strategy_ref, &mut driver, &task).await;
+            all_messages
+                .borrow_mut()
+                .extend(driver.messages().iter().cloned());
+            r
+        }
     };
 
-    let default_model = default_model.to_string();
-    let mut driver = AgentPhaseDriver::new(|req: &PhaseReq| {
-        // Profile tool policy first (a role can forbid tools entirely), then the
-        // phase's read/write scope narrows a planner to navigation-only.
-        let mut scoped: Vec<Arc<dyn AgentTool>> = full_tools
-            .iter()
-            .filter(|t| policy.permits(t.name()))
-            .cloned()
-            .collect();
-        if req.scope == ToolScope::ReadOnly {
-            scoped.retain(|t| READONLY_PHASE_TOOLS.contains(&t.name()));
+    // The gate: run the verify command (no command → always passes, single run).
+    let verify_gate = || async move {
+        let cmd = verify?;
+        eprintln!("\n[verify: {cmd}]");
+        let (ok, output) = run_verify_command(cmd.to_string(), cwd.to_path_buf()).await;
+        if ok {
+            eprintln!("[verify passed]");
+            None
+        } else {
+            eprintln!("[verify failed — feeding the failure back to the next attempt]");
+            Some(output)
         }
-        let model = req.model.clone().unwrap_or_else(|| default_model.clone());
-        eprintln!(
-            "\n\x1b[2m── phase {} · model {} · {}\x1b[0m",
-            req.phase_id,
-            model,
-            if req.scope == ToolScope::ReadOnly {
-                "read-only"
-            } else {
-                "full"
-            },
-        );
-        base.fork_for_phase(req.system.clone(), model, scoped)
-    });
+    };
 
-    // Ctrl-C aborts the whole run: dropping the strategy future cancels the
-    // in-flight phase's provider stream at its next await point. The pinned future
-    // is scoped to this block so its borrow of `driver` is released before we read
-    // the accumulated usage below.
-    let result = {
-        let run = run_strategy_async(&strategy, &mut driver, &task);
+    // Ctrl-C aborts the whole gated run by dropping its future, cancelling the
+    // in-flight provider stream at its await point. The future is scoped to this
+    // block so its borrows are released before we read the accumulated usage.
+    let result: anyhow::Result<GateOutcome> = {
+        let gated = run_gated(attempts, attempt, verify_gate);
         tokio::select! {
-            r = run => r,
+            r = gated => r,
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("\n[interrupted]");
                 Err(anyhow::anyhow!("interrupted"))
@@ -1202,9 +1293,20 @@ async fn run_strategy_turn(
         }
     };
 
-    let report = pirs_agent::usage::usage_report(driver.messages(), pirs_ai::Usage::default());
-    result?;
-    Ok(report)
+    let report = pirs_agent::usage::usage_report(&all_messages.borrow(), pirs_ai::Usage::default());
+    let passed = match result? {
+        GateOutcome::Passed { on_attempt } => {
+            if verify.is_some() {
+                eprintln!("\n[strategy passed the gate on attempt {on_attempt}]");
+            }
+            true
+        }
+        GateOutcome::Exhausted { .. } => {
+            eprintln!("\n[strategy did not pass the gate after {attempts} attempt(s)]");
+            false
+        }
+    };
+    Ok((report, passed))
 }
 
 struct SteerHandle {
