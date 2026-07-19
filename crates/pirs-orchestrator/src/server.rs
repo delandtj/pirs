@@ -88,11 +88,18 @@ async fn handle_connection(stream: UnixStream, supervisor: Arc<Supervisor>) -> a
                 &mut len,
             )
         };
-        if rc == 0 {
-            let uid = unsafe { libc::getuid() };
-            if cred.uid != 0 && cred.uid != uid {
-                anyhow::bail!("connection from foreign uid {}", cred.uid);
-            }
+        // Fail closed: if the peer's credentials can't be read, the connection
+        // is unauthenticated and must be refused — never served on the
+        // assumption it's local.
+        if rc != 0 {
+            anyhow::bail!(
+                "could not verify peer credentials: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        let uid = unsafe { libc::getuid() };
+        if !peer_authorized(cred.uid, uid) {
+            anyhow::bail!("connection from foreign uid {}", cred.uid);
         }
     }
     let (read_half, mut write_half) = stream.into_split();
@@ -281,4 +288,24 @@ async fn bridge_stream(
     reader_task.abort();
     command_task.abort();
     Ok(())
+}
+
+/// A peer may connect only if it runs as this process's own uid or as root.
+/// Any other uid is a foreign local user and is rejected.
+#[cfg(unix)]
+fn peer_authorized(peer_uid: u32, own_uid: u32) -> bool {
+    peer_uid == 0 || peer_uid == own_uid
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::peer_authorized;
+
+    #[test]
+    fn own_uid_and_root_allowed_foreign_rejected() {
+        assert!(peer_authorized(1000, 1000));
+        assert!(peer_authorized(0, 1000));
+        assert!(!peer_authorized(1001, 1000));
+        assert!(!peer_authorized(65534, 1000));
+    }
 }
