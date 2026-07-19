@@ -333,7 +333,7 @@ async fn main() -> anyhow::Result<()> {
         } else {
             Arc::new(replay::ReplayProvider::new(&tape))
         };
-        let tools: Vec<Arc<dyn pirs_agent::AgentTool>> = pirs_tools::default_tools(cwd)
+        let tools: Vec<Arc<dyn pirs_agent::AgentTool>> = pirs_tools::default_tools(cwd.clone())
             .into_iter()
             .map(|t| {
                 Arc::new(replay::CassetteTool::wrap(
@@ -344,7 +344,18 @@ async fn main() -> anyhow::Result<()> {
                 )) as Arc<dyn pirs_agent::AgentTool>
             })
             .collect();
-        let mut agent = Agent::new(provider, &model).with_tools(tools);
+        // Live replay calls the real LLM, so it must see the same system
+        // prompt the recording used — the default placeholder would produce a
+        // different session and every message would spuriously "diverge".
+        // (Strict replay drives the model from the tape, so the prompt is
+        // inert there; building it unconditionally keeps one code path.)
+        let mut system = system_prompt::build_system_prompt(&cwd, &tools);
+        if let Some(ctx) = system_prompt::read_project_context(&cwd) {
+            system.push_str(&ctx);
+        }
+        let mut agent = Agent::new(provider, &model)
+            .with_system_prompt(system)
+            .with_tools(tools);
         let produced = replay::run_replay(&mut agent, &tape).await;
         let report = replay::compare(&replay::expected_of(&tape), &produced);
         match report.divergence {
