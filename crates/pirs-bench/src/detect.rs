@@ -38,6 +38,10 @@ impl DetectorHost {
     pub fn new() -> Self {
         let root = Arc::new(Mutex::new(PathBuf::new()));
         let mut engine = Engine::new();
+        // Detectors are trusted (bundled/home-dir only, never the repo under test),
+        // so the expression-depth cap — a DoS guard for untrusted scripts — only
+        // gets in the way. Lift it generously; real detectors stay well under.
+        engine.set_max_expr_depths(0, 0);
 
         // file_read(rel) -> String — "" if missing or outside root.
         {
@@ -78,6 +82,9 @@ impl DetectorHost {
     /// the task repo can influence.
     pub fn with_bundled() -> anyhow::Result<Self> {
         let mut host = Self::new();
+        // Ranked first: the CI oracle is the highest-trust hypothesis (§ runner
+        // discovery), so a CI-confirmed runner is probed before structural guesses.
+        host.load_detector("ci", include_str!("../detectors/ci.rhai"))?;
         host.load_detector("pytest", include_str!("../detectors/pytest.rhai"))?;
         host.load_detector("go", include_str!("../detectors/go.rhai"))?;
         host.load_detector("rust", include_str!("../detectors/rust.rhai"))?;
@@ -233,6 +240,50 @@ mod tests {
         let py = specs.iter().find(|s| s.framework == "pytest").expect("pytest spec");
         assert!(py.test_cmd.contains("--junitxml={junit}"));
         assert!(py.test_cmd.contains("{tests}"));
+    }
+
+    #[test]
+    fn ci_oracle_extracts_installs_and_ranks_first() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname='x'\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+        std::fs::write(
+            dir.path().join(".github/workflows/ci.yml"),
+            "jobs:\n  test:\n    steps:\n\
+             \x20     - run: pip install -r requirements-test.txt\n\
+             \x20     - run: pip install -e .[dev] && pytest -q\n\
+             \x20     - run: python -m pytest tests/\n",
+        )
+        .unwrap();
+        let host = DetectorHost::with_bundled().unwrap();
+        let specs = host.detect(dir.path());
+
+        // CI oracle ranks first.
+        assert_eq!(specs[0].framework, "pytest-ci", "CI oracle must be highest trust");
+        // Real installs were extracted, the `&& pytest` tail was cut off.
+        assert!(specs[0].install.iter().any(|c| c.contains("requirements-test.txt")));
+        assert!(specs[0].install.iter().any(|c| c.contains("pip install -e .[dev]")));
+        assert!(
+            !specs[0].install.iter().any(|c| c.contains("pytest")),
+            "chain delimiter must strip the trailing `&& pytest`: {:?}",
+            specs[0].install
+        );
+        // The generic pytest detector still fires as a lower-trust fallback.
+        assert!(specs.iter().any(|s| s.framework == "pytest"));
+    }
+
+    #[test]
+    fn ci_oracle_silent_without_pytest_in_ci() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+        std::fs::write(
+            dir.path().join(".github/workflows/ci.yml"),
+            "jobs:\n  build:\n    steps:\n      - run: make lint\n",
+        )
+        .unwrap();
+        let host = DetectorHost::with_bundled().unwrap();
+        let specs = host.detect(dir.path());
+        assert!(!specs.iter().any(|s| s.framework == "pytest-ci"));
     }
 
     #[test]
