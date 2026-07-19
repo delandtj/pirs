@@ -122,8 +122,9 @@ mod tests {
             keep_green: vec![],
             base_sha: None,
         };
-        let outcome =
-            run_instance(&inst, &host, &mut cache, &mut NeverExecutor, 3).unwrap();
-        assert_eq!(outcome, Outcome::Failed(FailBucket::RunnerUndetected));
+        let report =
+            run_instance(&inst, &host, &mut cache, &mut NeverExecutor, 3, None).unwrap();
+        assert_eq!(report.outcome, Outcome::Failed(FailBucket::RunnerUndetected));
+        assert!(report.patch.is_none());
     }
 }
