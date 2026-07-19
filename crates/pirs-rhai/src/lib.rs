@@ -32,6 +32,7 @@ pub type SubagentRunner =
     Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync>;
 
 pub mod caps;
+pub mod discover;
 pub mod profile_script;
 pub mod strategy_script;
 

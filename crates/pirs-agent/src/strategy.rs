@@ -410,6 +410,18 @@ impl Strategy {
         }
     }
 
+    /// Names of the built-in strategies resolvable by [`Self::builtin`].
+    /// (`plan-oracle-exec` is excluded — it needs an oracle model argument and
+    /// cannot be constructed from a bare name.)
+    pub fn builtin_names() -> &'static [&'static str] {
+        &[
+            "monolithic",
+            "plan-exec",
+            "plan-critic-exec",
+            "wide-plan-exec",
+        ]
+    }
+
     /// Look up a built-in strategy by name.
     pub fn builtin(name: &str) -> Option<Self> {
         match name {
