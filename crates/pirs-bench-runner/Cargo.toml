@@ -21,6 +21,7 @@ pirs-graph = { path = "../pirs-graph" }
 pirs-rhai = { path = "../pirs-rhai" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+futures = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -129,6 +129,8 @@ enum StrategyKind {
     PlanExec,
     /// Planner → critic gate → fresh executor.
     PlanCriticExec,
+    /// N read-only planners explore in parallel → merged plan → fresh executor.
+    WidePlanExec,
 }
 
 impl From<StrategyKind> for Strategy {
@@ -137,6 +139,7 @@ impl From<StrategyKind> for Strategy {
             StrategyKind::Monolithic => Strategy::monolithic(),
             StrategyKind::PlanExec => Strategy::plan_exec(),
             StrategyKind::PlanCriticExec => Strategy::plan_critic_exec(),
+            StrategyKind::WidePlanExec => Strategy::wide_plan_exec(3),
         }
     }
 }

@@ -42,16 +42,48 @@ pub struct Phase {
     pub model: Option<String>,
 }
 
-/// A named, ordered sequence of phases.
+/// How a fan-out step merges its branches' outputs into the `{prev}` of the next
+/// step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Join {
+    /// Concatenate all branch outputs, each under a `## Branch N` heading.
+    Concat,
+    /// Keep only the first branch's output (e.g. fastest-wins / primary).
+    First,
+}
+
+/// One step of a strategy: a single phase, or a fan-out of branches run
+/// concurrently whose outputs are merged. Fan-out is how independent research or
+/// competing-hypothesis exploration runs in parallel.
+#[derive(Debug, Clone)]
+pub enum Step {
+    Solo(Phase),
+    Fan { branches: Vec<Phase>, join: Join },
+}
+
+/// A named, ordered sequence of steps.
 #[derive(Debug, Clone)]
 pub struct Strategy {
     pub name: String,
-    pub phases: Vec<Phase>,
+    pub steps: Vec<Step>,
     /// When true, the (single) phase's context is reused across attempts so the
     /// agent accumulates memory — the "monolithic" baseline. When false, every
     /// phase starts from a clean context each attempt (the plan/execute split,
     /// whose whole point is a fresh executor seeded with only the plan).
     pub persist_across_attempts: bool,
+}
+
+/// A fully-rendered phase ready to run: the engine has already substituted the
+/// prompt template, so the driver only executes it. Owned so it can move into a
+/// concurrent task.
+#[derive(Debug, Clone)]
+pub struct PhaseReq {
+    pub phase_id: String,
+    pub system: String,
+    pub prompt: String,
+    pub scope: ToolScope,
+    pub fresh: bool,
+    pub model: Option<String>,
 }
 
 /// The task a strategy is run against.
@@ -71,15 +103,16 @@ pub struct Task {
 /// continuity; `fresh` forces a new context, dropping any prior messages for that
 /// id. `scope` selects the tool set.
 pub trait PhaseDriver {
-    fn run_phase(
-        &mut self,
-        phase_id: &str,
-        system: &str,
-        prompt: &str,
-        scope: ToolScope,
-        fresh: bool,
-        model: Option<&str>,
-    ) -> anyhow::Result<String>;
+    /// Run one fully-rendered phase and return its text output.
+    fn run_phase(&mut self, req: &PhaseReq) -> anyhow::Result<String>;
+
+    /// Run several phases concurrently, one result per request in order. The
+    /// default runs them sequentially; a host with a runtime should override this
+    /// to dispatch in parallel. Fan-out branches are read-only by contract, so
+    /// concurrent execution cannot race on the tree.
+    fn run_parallel(&mut self, reqs: &[PhaseReq]) -> Vec<anyhow::Result<String>> {
+        reqs.iter().map(|r| self.run_phase(r)).collect()
+    }
 }
 
 /// Render a bulleted list of test targets.
@@ -124,23 +157,63 @@ pub fn run_strategy(
     driver: &mut dyn PhaseDriver,
     task: &Task,
 ) -> anyhow::Result<()> {
+    // Persistent strategies continue their context across attempts; split
+    // strategies always start each phase clean.
+    let fresh = !strategy.persist_across_attempts;
     let mut prev = String::new();
-    for (i, phase) in strategy.phases.iter().enumerate() {
-        let phase_id = format!("{}#{i}", strategy.name);
-        let prompt = render(&phase.prompt, task, &prev);
-        // Persistent strategies continue their context across attempts; split
-        // strategies always start each phase clean.
-        let fresh = !strategy.persist_across_attempts;
-        prev = driver.run_phase(
-            &phase_id,
-            &phase.system,
-            &prompt,
-            phase.scope,
-            fresh,
-            phase.model.as_deref(),
-        )?;
+    for (i, step) in strategy.steps.iter().enumerate() {
+        match step {
+            Step::Solo(phase) => {
+                let id = format!("{}#{i}", strategy.name);
+                let req = req_for(id, phase, task, &prev, fresh);
+                prev = driver.run_phase(&req)?;
+            }
+            Step::Fan { branches, join } => {
+                let reqs: Vec<PhaseReq> = branches
+                    .iter()
+                    .enumerate()
+                    .map(|(b, phase)| {
+                        let id = format!("{}#{i}.{b}", strategy.name);
+                        req_for(id, phase, task, &prev, fresh)
+                    })
+                    .collect();
+                let results = driver.run_parallel(&reqs);
+                // Tolerate partial branch failure: merge the successes; only error
+                // if the whole fan-out came up empty.
+                let outs: Vec<String> = results.into_iter().filter_map(|r| r.ok()).collect();
+                if outs.is_empty() {
+                    anyhow::bail!("all parallel branches failed at step {i}");
+                }
+                prev = merge(*join, &outs);
+            }
+        }
     }
     Ok(())
+}
+
+/// Build a rendered request for one phase under the given `phase_id`.
+fn req_for(phase_id: String, phase: &Phase, task: &Task, prev: &str, fresh: bool) -> PhaseReq {
+    PhaseReq {
+        phase_id,
+        system: phase.system.clone(),
+        prompt: render(&phase.prompt, task, prev),
+        scope: phase.scope,
+        fresh,
+        model: phase.model.clone(),
+    }
+}
+
+/// Merge a fan-out step's branch outputs per its [`Join`].
+fn merge(join: Join, outs: &[String]) -> String {
+    match join {
+        Join::First => outs.first().cloned().unwrap_or_default(),
+        Join::Concat => outs
+            .iter()
+            .enumerate()
+            .map(|(i, o)| format!("## Branch {}\n{}", i + 1, o.trim()))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    }
 }
 
 // ---- Built-in strategies ---------------------------------------------------
@@ -245,13 +318,29 @@ fn phase(system: &str, prompt: &str, scope: ToolScope) -> Phase {
     }
 }
 
+/// A single-phase step on the default model.
+fn solo(system: &str, prompt: &str, scope: ToolScope) -> Step {
+    Step::Solo(phase(system, prompt, scope))
+}
+
+/// Prompt angles for the wide (parallel) planner: each branch investigates from a
+/// different starting point, so the branches don't collapse onto one hypothesis.
+const WIDE_ANGLES: &[&str] = &[
+    "Focus on the failing assertion itself: what value is produced vs expected, and \
+     which function computes it.",
+    "Focus on the most recently changed or most complex code path touched by the \
+     failing test.",
+    "Focus on boundary/edge handling (empty, zero, off-by-one, sign) in the code \
+     under test.",
+];
+
 impl Strategy {
     /// One self-correcting loop in a persistent context. The baseline.
     pub fn monolithic() -> Self {
         Strategy {
             name: "monolithic".into(),
             persist_across_attempts: true,
-            phases: vec![phase(MONO_SYSTEM, MONO_PROMPT, ToolScope::Full)],
+            steps: vec![solo(MONO_SYSTEM, MONO_PROMPT, ToolScope::Full)],
         }
     }
 
@@ -260,9 +349,9 @@ impl Strategy {
         Strategy {
             name: "plan-exec".into(),
             persist_across_attempts: false,
-            phases: vec![
-                phase(PLAN_SYSTEM, PLAN_PROMPT, ToolScope::ReadOnly),
-                phase(EXEC_SYSTEM, EXEC_PROMPT, ToolScope::Full),
+            steps: vec![
+                solo(PLAN_SYSTEM, PLAN_PROMPT, ToolScope::ReadOnly),
+                solo(EXEC_SYSTEM, EXEC_PROMPT, ToolScope::Full),
             ],
         }
     }
@@ -272,10 +361,10 @@ impl Strategy {
         Strategy {
             name: "plan-critic-exec".into(),
             persist_across_attempts: false,
-            phases: vec![
-                phase(PLAN_SYSTEM, PLAN_PROMPT, ToolScope::ReadOnly),
-                phase(CRITIC_SYSTEM, CRITIC_PROMPT, ToolScope::ReadOnly),
-                phase(EXEC_SYSTEM, EXEC_PROMPT, ToolScope::Full),
+            steps: vec![
+                solo(PLAN_SYSTEM, PLAN_PROMPT, ToolScope::ReadOnly),
+                solo(CRITIC_SYSTEM, CRITIC_PROMPT, ToolScope::ReadOnly),
+                solo(EXEC_SYSTEM, EXEC_PROMPT, ToolScope::Full),
             ],
         }
     }
@@ -289,10 +378,34 @@ impl Strategy {
         Strategy {
             name: "plan-oracle-exec".into(),
             persist_across_attempts: false,
-            phases: vec![
-                phase(PLAN_SYSTEM, PLAN_PROMPT, ToolScope::ReadOnly),
-                critic,
-                phase(EXEC_SYSTEM, EXEC_PROMPT, ToolScope::Full),
+            steps: vec![
+                solo(PLAN_SYSTEM, PLAN_PROMPT, ToolScope::ReadOnly),
+                Step::Solo(critic),
+                solo(EXEC_SYSTEM, EXEC_PROMPT, ToolScope::Full),
+            ],
+        }
+    }
+
+    /// `n` planners explore **in parallel** from different angles, their findings
+    /// are merged, then a fresh executor acts on the combined plan. The SoulForge
+    /// dispatch pattern: concurrent read-only research, then a single edit.
+    pub fn wide_plan_exec(n: usize) -> Self {
+        let n = n.clamp(2, WIDE_ANGLES.len());
+        let branches = (0..n)
+            .map(|i| {
+                let prompt = format!("{}\n\n{}", WIDE_ANGLES[i], PLAN_PROMPT);
+                phase(PLAN_SYSTEM, &prompt, ToolScope::ReadOnly)
+            })
+            .collect();
+        Strategy {
+            name: "wide-plan-exec".into(),
+            persist_across_attempts: false,
+            steps: vec![
+                Step::Fan {
+                    branches,
+                    join: Join::Concat,
+                },
+                solo(EXEC_SYSTEM, EXEC_PROMPT, ToolScope::Full),
             ],
         }
     }
@@ -303,6 +416,7 @@ impl Strategy {
             "monolithic" => Some(Self::monolithic()),
             "plan-exec" => Some(Self::plan_exec()),
             "plan-critic-exec" => Some(Self::plan_critic_exec()),
+            "wide-plan-exec" => Some(Self::wide_plan_exec(3)),
             _ => None,
         }
     }
@@ -317,26 +431,23 @@ mod tests {
     #[derive(Default)]
     struct RecordingDriver {
         calls: Vec<(String, ToolScope, bool, String, Option<String>)>,
+        /// phase_ids that should fail — used to exercise partial fan-out failure.
+        fail: Vec<String>,
     }
     impl PhaseDriver for RecordingDriver {
-        fn run_phase(
-            &mut self,
-            phase_id: &str,
-            _system: &str,
-            prompt: &str,
-            scope: ToolScope,
-            fresh: bool,
-            model: Option<&str>,
-        ) -> anyhow::Result<String> {
+        fn run_phase(&mut self, req: &PhaseReq) -> anyhow::Result<String> {
             self.calls.push((
-                phase_id.to_string(),
-                scope,
-                fresh,
-                prompt.to_string(),
-                model.map(str::to_string),
+                req.phase_id.clone(),
+                req.scope,
+                req.fresh,
+                req.prompt.clone(),
+                req.model.clone(),
             ));
+            if self.fail.contains(&req.phase_id) {
+                anyhow::bail!("forced failure for {}", req.phase_id);
+            }
             // Return a phase-specific marker to trace it into the next {prev}.
-            Ok(format!("OUTPUT_OF[{phase_id}]"))
+            Ok(format!("OUTPUT_OF[{}]", req.phase_id))
         }
     }
 
@@ -407,7 +518,7 @@ mod tests {
 
     #[test]
     fn builtin_lookup_matches_names_and_rejects_unknown() {
-        assert_eq!(Strategy::builtin("plan-exec").unwrap().phases.len(), 2);
+        assert_eq!(Strategy::builtin("plan-exec").unwrap().steps.len(), 2);
         assert!(Strategy::builtin("nope").is_none());
     }
 
@@ -420,5 +531,84 @@ mod tests {
         assert_eq!(d.calls[0].4, None);
         assert_eq!(d.calls[1].4, Some("strong-model".to_string()));
         assert_eq!(d.calls[2].4, None);
+    }
+
+    /// A driver whose `run_parallel` marks each branch's output so we can prove the
+    /// concurrent path (not the sequential fallback) actually ran.
+    #[derive(Default)]
+    struct ParallelDriver {
+        parallel_widths: Vec<usize>,
+    }
+    impl PhaseDriver for ParallelDriver {
+        fn run_phase(&mut self, req: &PhaseReq) -> anyhow::Result<String> {
+            Ok(format!("SOLO[{}]", req.phase_id))
+        }
+        fn run_parallel(&mut self, reqs: &[PhaseReq]) -> Vec<anyhow::Result<String>> {
+            self.parallel_widths.push(reqs.len());
+            reqs.iter()
+                .map(|r| Ok(format!("PAR[{}]", r.phase_id)))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn wide_plan_exec_fans_out_then_executes_on_the_merged_plan() {
+        let mut d = RecordingDriver::default();
+        run_strategy(&Strategy::wide_plan_exec(3), &mut d, &task()).unwrap();
+        // 3 parallel planners + 1 executor.
+        assert_eq!(d.calls.len(), 4);
+        // Branch ids carry the `.b` suffix; all read-only.
+        assert_eq!(d.calls[0].0, "wide-plan-exec#0.0");
+        assert_eq!(d.calls[2].0, "wide-plan-exec#0.2");
+        assert!(d.calls[..3].iter().all(|c| c.1 == ToolScope::ReadOnly));
+        // The executor is full-scope and its prompt embeds every branch, merged
+        // under `## Branch N` headings.
+        let exec = &d.calls[3];
+        assert_eq!(exec.1, ToolScope::Full);
+        assert!(exec.3.contains("## Branch 1"));
+        assert!(exec.3.contains("OUTPUT_OF[wide-plan-exec#0.0]"));
+        assert!(exec.3.contains("OUTPUT_OF[wide-plan-exec#0.2]"));
+    }
+
+    #[test]
+    fn fan_out_uses_the_drivers_parallel_path() {
+        let mut d = ParallelDriver::default();
+        run_strategy(&Strategy::wide_plan_exec(2), &mut d, &task()).unwrap();
+        // One fan-out step of width 2 went through run_parallel, not run_phase.
+        assert_eq!(d.parallel_widths, vec![2]);
+    }
+
+    #[test]
+    fn fan_out_tolerates_partial_branch_failure() {
+        let mut d = RecordingDriver {
+            fail: vec!["wide-plan-exec#0.1".into()],
+            ..Default::default()
+        };
+        run_strategy(&Strategy::wide_plan_exec(3), &mut d, &task()).unwrap();
+        // Executor still ran; its merged plan contains the two surviving branches
+        // and not the failed one.
+        let exec = &d.calls.last().unwrap().3;
+        assert!(exec.contains("OUTPUT_OF[wide-plan-exec#0.0]"));
+        assert!(exec.contains("OUTPUT_OF[wide-plan-exec#0.2]"));
+        assert!(!exec.contains("wide-plan-exec#0.1]"));
+    }
+
+    #[test]
+    fn fan_out_fails_only_when_all_branches_fail() {
+        let mut d = RecordingDriver {
+            fail: vec!["wide-plan-exec#0.0".into(), "wide-plan-exec#0.1".into()],
+            ..Default::default()
+        };
+        let err = run_strategy(&Strategy::wide_plan_exec(2), &mut d, &task()).unwrap_err();
+        assert!(err.to_string().contains("all parallel branches failed"));
+    }
+
+    #[test]
+    fn merge_first_keeps_only_the_primary_branch() {
+        let outs = vec!["A".to_string(), "B".to_string()];
+        assert_eq!(merge(Join::First, &outs), "A");
+        let concat = merge(Join::Concat, &outs);
+        assert!(concat.contains("## Branch 1\nA"));
+        assert!(concat.contains("## Branch 2\nB"));
     }
 }

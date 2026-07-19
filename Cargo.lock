@@ -1470,6 +1470,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "futures",
  "pirs-agent",
  "pirs-ai",
  "pirs-bench",

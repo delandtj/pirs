@@ -1,6 +1,6 @@
 //! User-authored loop strategies in Rhai.
 //!
-//! A strategy script evaluates to a map describing an ordered phase list — the
+//! A strategy script evaluates to a map describing an ordered list of steps — the
 //! same shape as a built-in [`Strategy`], but written by the user:
 //!
 //! ```rhai
@@ -14,16 +14,27 @@
 //! }
 //! ```
 //!
+//! A step may instead fan out: give it a `parallel` array of phases (all run
+//! concurrently, read-only by contract) and an optional `join` (`"concat"` — the
+//! default — or `"first"`) that says how the branch outputs feed the next step's
+//! `{prev}`:
+//!
+//! ```rhai
+//! #{ parallel: [ #{ system: "...", prompt: "angle A {issue}", scope: "readonly" },
+//!                #{ system: "...", prompt: "angle B {issue}", scope: "readonly" } ],
+//!    join: "concat" }
+//! ```
+//!
 //! Prompt placeholders (`{issue}`, `{targets}`, `{prev}`, `{verdict}`) are
 //! rendered by the engine at run time — see [`pirs_agent::strategy::render`].
-//! Scripts are data-only: they build the phase list and return it. There is no
+//! Scripts are data-only: they build the step list and return it. There is no
 //! access to the file system or tools from the script itself; the *phases* run
 //! through the host's [`PhaseDriver`](pirs_agent::strategy::PhaseDriver).
 
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context as _};
-use pirs_agent::strategy::{Phase, Strategy, ToolScope};
+use pirs_agent::strategy::{Join, Phase, Step, Strategy, ToolScope};
 use rhai::{Array, Dynamic, Engine, Map};
 
 /// Load a strategy from a Rhai script file. The strategy's default name is the
@@ -53,6 +64,56 @@ fn get_str(map: &Map, key: &str) -> Option<String> {
     map.get(key).and_then(|v| v.clone().into_string().ok())
 }
 
+/// Parse one phase map (`system`, `prompt`, `scope?`, `model?`). `where_` labels
+/// the phase in error messages.
+fn phase_from_map(pm: &Map, where_: &str) -> anyhow::Result<Phase> {
+    let system =
+        get_str(pm, "system").ok_or_else(|| anyhow!("{where_} is missing a `system` string"))?;
+    let prompt =
+        get_str(pm, "prompt").ok_or_else(|| anyhow!("{where_} is missing a `prompt` string"))?;
+    let scope = match get_str(pm, "scope").as_deref().unwrap_or("full") {
+        "readonly" | "read_only" | "read-only" => ToolScope::ReadOnly,
+        "full" => ToolScope::Full,
+        other => bail!("{where_} has unknown scope {other:?} (use \"readonly\" or \"full\")"),
+    };
+    // Optional per-phase model override — the Oracle lever.
+    let model = get_str(pm, "model");
+    Ok(Phase {
+        system,
+        prompt,
+        scope,
+        model,
+    })
+}
+
+/// Parse one step: either a solo phase (`system`/`prompt` at the top level) or a
+/// fan-out (`parallel: [...]` with an optional `join`).
+fn step_from_map(sm: Map, i: usize) -> anyhow::Result<Step> {
+    if let Some(par) = sm.get("parallel").cloned() {
+        let arr = par
+            .try_cast::<Array>()
+            .ok_or_else(|| anyhow!("step {i}: `parallel` must be an array of phases"))?;
+        if arr.is_empty() {
+            bail!("step {i}: `parallel` must have at least one branch");
+        }
+        let mut branches = Vec::with_capacity(arr.len());
+        for (b, item) in arr.into_iter().enumerate() {
+            let pm = item
+                .try_cast::<Map>()
+                .ok_or_else(|| anyhow!("step {i} branch {b} must be a map"))?;
+            branches.push(phase_from_map(&pm, &format!("step {i} branch {b}"))?);
+        }
+        let join = match get_str(&sm, "join").as_deref().unwrap_or("concat") {
+            "concat" => Join::Concat,
+            "first" => Join::First,
+            other => bail!("step {i} has unknown join {other:?} (use \"concat\" or \"first\")"),
+        };
+        Ok(Step::Fan { branches, join })
+    } else {
+        Ok(Step::Solo(phase_from_map(&sm, &format!("phase {i}"))?))
+    }
+}
+
 fn strategy_from_dynamic(value: Dynamic, default_name: &str) -> anyhow::Result<Strategy> {
     let map = value
         .try_cast::<Map>()
@@ -75,33 +136,17 @@ fn strategy_from_dynamic(value: Dynamic, default_name: &str) -> anyhow::Result<S
         bail!("strategy must have at least one phase");
     }
 
-    let mut phases = Vec::with_capacity(phases_arr.len());
+    let mut steps = Vec::with_capacity(phases_arr.len());
     for (i, item) in phases_arr.into_iter().enumerate() {
-        let pm = item
+        let sm = item
             .try_cast::<Map>()
-            .ok_or_else(|| anyhow!("phase {i} must be a map"))?;
-        let system = get_str(&pm, "system")
-            .ok_or_else(|| anyhow!("phase {i} is missing a `system` string"))?;
-        let prompt = get_str(&pm, "prompt")
-            .ok_or_else(|| anyhow!("phase {i} is missing a `prompt` string"))?;
-        let scope = match get_str(&pm, "scope").as_deref().unwrap_or("full") {
-            "readonly" | "read_only" | "read-only" => ToolScope::ReadOnly,
-            "full" => ToolScope::Full,
-            other => bail!("phase {i} has unknown scope {other:?} (use \"readonly\" or \"full\")"),
-        };
-        // Optional per-phase model override — the Oracle lever.
-        let model = get_str(&pm, "model");
-        phases.push(Phase {
-            system,
-            prompt,
-            scope,
-            model,
-        });
+            .ok_or_else(|| anyhow!("step {i} must be a map"))?;
+        steps.push(step_from_map(sm, i)?);
     }
 
     Ok(Strategy {
         name,
-        phases,
+        steps,
         persist_across_attempts: persist,
     })
 }
@@ -109,6 +154,14 @@ fn strategy_from_dynamic(value: Dynamic, default_name: &str) -> anyhow::Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Extract the phase from a solo step, panicking if it is a fan-out.
+    fn solo(step: &Step) -> &Phase {
+        match step {
+            Step::Solo(p) => p,
+            Step::Fan { .. } => panic!("expected a solo step, got a fan-out"),
+        }
+    }
 
     #[test]
     fn loads_a_two_phase_plan_exec_strategy() {
@@ -125,10 +178,10 @@ mod tests {
         let s = load_strategy_str(src, "fallback").unwrap();
         assert_eq!(s.name, "custom-plan-exec");
         assert!(!s.persist_across_attempts);
-        assert_eq!(s.phases.len(), 2);
-        assert_eq!(s.phases[0].scope, ToolScope::ReadOnly);
-        assert_eq!(s.phases[1].scope, ToolScope::Full);
-        assert!(s.phases[0].prompt.contains("{issue}"));
+        assert_eq!(s.steps.len(), 2);
+        assert_eq!(solo(&s.steps[0]).scope, ToolScope::ReadOnly);
+        assert_eq!(solo(&s.steps[1]).scope, ToolScope::Full);
+        assert!(solo(&s.steps[0]).prompt.contains("{issue}"));
     }
 
     #[test]
@@ -136,8 +189,8 @@ mod tests {
         let src = r#"#{ phases: [ #{ system: "s", prompt: "p" } ] }"#;
         let s = load_strategy_str(src, "fallback").unwrap();
         assert_eq!(s.name, "fallback");
-        assert_eq!(s.phases[0].scope, ToolScope::Full);
-        assert_eq!(s.phases[0].model, None);
+        assert_eq!(solo(&s.steps[0]).scope, ToolScope::Full);
+        assert_eq!(solo(&s.steps[0]).model, None);
     }
 
     #[test]
@@ -150,9 +203,9 @@ mod tests {
             ] }
         "#;
         let s = load_strategy_str(src, "x").unwrap();
-        assert_eq!(s.phases[0].model, None);
-        assert_eq!(s.phases[1].model, Some("deepseek-v4-pro".to_string()));
-        assert_eq!(s.phases[2].model, None);
+        assert_eq!(solo(&s.steps[0]).model, None);
+        assert_eq!(solo(&s.steps[1]).model, Some("deepseek-v4-pro".to_string()));
+        assert_eq!(solo(&s.steps[2]).model, None);
     }
 
     #[test]
@@ -167,8 +220,46 @@ mod tests {
             #{ name: "refine-3", phases: phases }
         "#;
         let s = load_strategy_str(src, "x").unwrap();
-        assert_eq!(s.phases.len(), 3);
-        assert!(s.phases[2].prompt.contains("round 2"));
+        assert_eq!(s.steps.len(), 3);
+        assert!(solo(&s.steps[2]).prompt.contains("round 2"));
+    }
+
+    #[test]
+    fn a_parallel_step_becomes_a_fan_out() {
+        let src = r#"
+            #{ name: "wide", phases: [
+                #{ parallel: [
+                    #{ system: "a", prompt: "angle A {issue}", scope: "readonly" },
+                    #{ system: "b", prompt: "angle B {issue}", scope: "readonly" },
+                ], join: "concat" },
+                #{ system: "exec", prompt: "do {prev}", scope: "full" },
+            ] }
+        "#;
+        let s = load_strategy_str(src, "x").unwrap();
+        assert_eq!(s.steps.len(), 2);
+        match &s.steps[0] {
+            Step::Fan { branches, join } => {
+                assert_eq!(branches.len(), 2);
+                assert_eq!(*join, Join::Concat);
+                assert_eq!(branches[0].scope, ToolScope::ReadOnly);
+            }
+            _ => panic!("first step must be a fan-out"),
+        }
+        assert_eq!(solo(&s.steps[1]).scope, ToolScope::Full);
+    }
+
+    #[test]
+    fn join_defaults_to_concat_and_rejects_unknown() {
+        let ok = r#"#{ phases: [ #{ parallel: [ #{ system: "a", prompt: "p", scope: "readonly" } ] } ] }"#;
+        let s = load_strategy_str(ok, "x").unwrap();
+        match &s.steps[0] {
+            Step::Fan { join, .. } => assert_eq!(*join, Join::Concat),
+            _ => panic!("expected fan-out"),
+        }
+        let bad =
+            r#"#{ phases: [ #{ parallel: [ #{ system: "a", prompt: "p" } ], join: "vote" } ] }"#;
+        let err = load_strategy_str(bad, "x").unwrap_err().to_string();
+        assert!(err.contains("unknown join"), "{err}");
     }
 
     #[test]

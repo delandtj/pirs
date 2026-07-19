@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use pirs_agent::agent_loop::{run_agent_loop, Budgets, LoopConfig};
-use pirs_agent::strategy::{self, PhaseDriver, ToolScope};
+use pirs_agent::strategy::{self, PhaseDriver, PhaseReq, ToolScope};
 use pirs_agent::trace::Recorder;
 use pirs_agent::{AgentEvent, AgentTool, Emit, ExecutionMode, Hooks};
 use pirs_ai::anthropic::AnthropicClient;
@@ -246,14 +246,12 @@ impl AgentExecutor {
         }
     }
 
-    /// Run one agent loop over `context` with `tools`, seeded by `prompt`. Builds
-    /// the event hook (behavior stats + per-tool timing), runs to the turn budget,
-    /// and returns the raw messages produced. Token usage is folded by the caller
-    /// (via [`fold_usage`]) so this stays a plain associated fn and sidesteps
-    /// borrowing `self` while a `self`-owned context is passed in.
+    /// Build the event hook (behavior stats + per-tool timing) and run one agent
+    /// loop over `context`, seeded by `prompt`. Async so several branches can be
+    /// driven concurrently (I/O-bound LLM calls interleave at their await points).
+    /// Token usage is folded by the caller (via [`fold_usage`]).
     #[allow(clippy::too_many_arguments)]
-    fn run_loop(
-        rt: &Arc<tokio::runtime::Runtime>,
+    async fn run_loop_async(
         provider: &Arc<dyn LlmProvider>,
         cfg: &LoopConfig,
         stats: &Arc<Mutex<SessionStats>>,
@@ -302,41 +300,89 @@ impl AgentExecutor {
             }
         });
         let cancel = CancellationToken::new();
-        rt.block_on(async {
-            let (msgs, _budget) = run_agent_loop(
-                vec![Message::user(prompt)],
-                context,
-                tools,
-                provider,
-                cfg,
-                &emit,
-                cancel,
-            )
-            .await;
-            msgs
-        })
+        let (msgs, _budget) = run_agent_loop(
+            vec![Message::user(prompt)],
+            context,
+            tools,
+            provider,
+            cfg,
+            &emit,
+            cancel,
+        )
+        .await;
+        msgs
+    }
+
+    /// Blocking wrapper around [`run_loop_async`] for the single-phase (solo) path.
+    #[allow(clippy::too_many_arguments)]
+    fn run_loop(
+        rt: &Arc<tokio::runtime::Runtime>,
+        provider: &Arc<dyn LlmProvider>,
+        cfg: &LoopConfig,
+        stats: &Arc<Mutex<SessionStats>>,
+        tools: &[Arc<dyn AgentTool>],
+        context: &mut Context,
+        prompt: String,
+        recorder: Option<&Arc<Recorder>>,
+        phase_id: &str,
+    ) -> Vec<Message> {
+        rt.block_on(Self::run_loop_async(
+            provider, cfg, stats, tools, context, prompt, recorder, phase_id,
+        ))
+    }
+
+    /// The scoped tool set for a phase.
+    fn tools_for(&self, scope: ToolScope) -> &[Arc<dyn AgentTool>] {
+        match scope {
+            ToolScope::ReadOnly => &self.planner_tools,
+            ToolScope::Full => &self.tools,
+        }
+    }
+
+    /// Record a `phase.start` trace event (no-op without a recorder).
+    fn record_phase_start(&self, req: &PhaseReq, model: &str) {
+        if let Some(r) = &self.recorder {
+            r.event(
+                "phase.start",
+                serde_json::json!({
+                    "phase": req.phase_id,
+                    "attempt": self.attempt_no,
+                    "scope": format!("{:?}", req.scope),
+                    "fresh": req.fresh,
+                    "model": model,
+                    "prompt": req.prompt,
+                }),
+            );
+        }
+    }
+
+    /// Record a `phase.end` trace event (no-op without a recorder).
+    fn record_phase_end(&self, phase_id: &str, messages: usize, output: &str) {
+        if let Some(r) = &self.recorder {
+            r.event(
+                "phase.end",
+                serde_json::json!({
+                    "phase": phase_id,
+                    "attempt": self.attempt_no,
+                    "messages": messages,
+                    "output": output,
+                }),
+            );
+        }
     }
 }
 
 impl PhaseDriver for AgentExecutor {
     /// Run one strategy phase: pick the scoped tool set, get or (re)create the
     /// phase's context, drive the loop, fold usage, and return the phase's text.
-    fn run_phase(
-        &mut self,
-        phase_id: &str,
-        system: &str,
-        prompt: &str,
-        scope: ToolScope,
-        fresh: bool,
-        model: Option<&str>,
-    ) -> anyhow::Result<String> {
+    fn run_phase(&mut self, req: &PhaseReq) -> anyhow::Result<String> {
         // A fresh phase, or one never seen, starts from a clean context holding
         // only its system prompt — the plan/execute split's core mechanic.
-        if fresh || !self.phase_contexts.contains_key(phase_id) {
+        if req.fresh || !self.phase_contexts.contains_key(&req.phase_id) {
             self.phase_contexts.insert(
-                phase_id.to_string(),
+                req.phase_id.clone(),
                 Context {
-                    system_prompt: Some(system.to_string()),
+                    system_prompt: Some(req.system.clone()),
                     messages: Vec::new(),
                     tools: Vec::new(),
                 },
@@ -344,57 +390,94 @@ impl PhaseDriver for AgentExecutor {
         }
 
         // The phase may override the run's default model — the Oracle lever.
-        let phase_model = model.unwrap_or(&self.model).to_string();
-
-        if let Some(r) = &self.recorder {
-            r.event(
-                "phase.start",
-                serde_json::json!({
-                    "phase": phase_id,
-                    "attempt": self.attempt_no,
-                    "scope": format!("{scope:?}"),
-                    "fresh": fresh,
-                    "model": phase_model,
-                    "prompt": prompt,
-                }),
-            );
-        }
+        let phase_model = req.model.clone().unwrap_or_else(|| self.model.clone());
+        self.record_phase_start(req, &phase_model);
 
         let mut cfg = self.loop_config();
         cfg.model = phase_model;
-        let tools: &[Arc<dyn AgentTool>] = match scope {
-            ToolScope::ReadOnly => &self.planner_tools,
-            ToolScope::Full => &self.tools,
-        };
+        let tools: Vec<Arc<dyn AgentTool>> = self.tools_for(req.scope).to_vec();
         let ctx = self
             .phase_contexts
-            .get_mut(phase_id)
+            .get_mut(&req.phase_id)
             .expect("context inserted above");
         let msgs = Self::run_loop(
             &self.rt,
             &self.provider,
             &cfg,
             &self.stats,
-            tools,
+            &tools,
             ctx,
-            prompt.to_string(),
+            req.prompt.clone(),
             self.recorder.as_ref(),
-            phase_id,
+            &req.phase_id,
         );
         self.fold_usage(&msgs);
         let output = last_assistant_text(&msgs);
-        if let Some(r) = &self.recorder {
-            r.event(
-                "phase.end",
-                serde_json::json!({
-                    "phase": phase_id,
-                    "attempt": self.attempt_no,
-                    "messages": msgs.len(),
-                    "output": output,
-                }),
-            );
-        }
+        self.record_phase_end(&req.phase_id, msgs.len(), &output);
         Ok(output)
+    }
+
+    /// Fan-out: drive every branch concurrently on the owned runtime. Branches are
+    /// read-only by contract, so each gets a private, ephemeral context (never
+    /// stored in `phase_contexts`) and the concurrent loops cannot race on the tree
+    /// or on shared conversation state. I/O-bound LLM calls interleave at their
+    /// await points, so N branches finish in ~one branch's wall-clock.
+    fn run_parallel(&mut self, reqs: &[PhaseReq]) -> Vec<anyhow::Result<String>> {
+        // Per-branch config (each may override the model) and private context.
+        let cfgs: Vec<LoopConfig> = reqs
+            .iter()
+            .map(|req| {
+                let mut cfg = self.loop_config();
+                cfg.model = req.model.clone().unwrap_or_else(|| self.model.clone());
+                self.record_phase_start(req, &cfg.model);
+                cfg
+            })
+            .collect();
+        let mut ctxs: Vec<Context> = reqs
+            .iter()
+            .map(|req| Context {
+                system_prompt: Some(req.system.clone()),
+                messages: Vec::new(),
+                tools: Vec::new(),
+            })
+            .collect();
+        let tool_sets: Vec<Vec<Arc<dyn AgentTool>>> = reqs
+            .iter()
+            .map(|req| self.tools_for(req.scope).to_vec())
+            .collect();
+
+        let provider = &self.provider;
+        let stats = &self.stats;
+        let recorder = self.recorder.clone();
+        let results: Vec<Vec<Message>> = self.rt.block_on(async {
+            let futs = ctxs
+                .iter_mut()
+                .zip(reqs.iter())
+                .zip(cfgs.iter())
+                .zip(tool_sets.iter())
+                .map(|(((ctx, req), cfg), tools)| {
+                    Self::run_loop_async(
+                        provider,
+                        cfg,
+                        stats,
+                        tools,
+                        ctx,
+                        req.prompt.clone(),
+                        recorder.as_ref(),
+                        &req.phase_id,
+                    )
+                });
+            futures::future::join_all(futs).await
+        });
+
+        let mut out = Vec::with_capacity(reqs.len());
+        for (msgs, req) in results.into_iter().zip(reqs.iter()) {
+            self.fold_usage(&msgs);
+            let text = last_assistant_text(&msgs);
+            self.record_phase_end(&req.phase_id, msgs.len(), &text);
+            out.push(Ok(text));
+        }
+        out
     }
 }
 
