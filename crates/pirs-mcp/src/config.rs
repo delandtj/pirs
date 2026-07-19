@@ -265,8 +265,14 @@ fn prompt_mcp_trust(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    // These tests mutate the process-global HOME to isolate from a real
+    // ~/.pirs/mcp.json. Cargo runs tests in parallel threads, so they must be
+    // serialized or one test's set_var races another's read.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn loads_claude_code_format() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path().join("no-home"));
         std::fs::write(
@@ -298,6 +304,7 @@ mod tests {
 
     #[test]
     fn http_servers_become_http_specs() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path().join("no-home"));
         std::env::set_var("PIRS_TEST_KEY", "sekrit");
@@ -320,6 +327,7 @@ mod tests {
 
     #[test]
     fn untrusted_project_config_is_not_loaded() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path().join("no-home"));
         std::fs::write(
@@ -340,6 +348,7 @@ mod tests {
 
     #[test]
     fn trust_decider_sees_the_config_path() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path().join("no-home"));
         std::fs::write(
