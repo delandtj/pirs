@@ -113,12 +113,18 @@ impl HttpClient {
             .unwrap_or("")
             .to_string();
 
-        let payload = if content_type.contains("text/event-stream") {
-            read_sse_for_id(response, id).await?
-        } else {
-            let v: Value = response.json().await?;
-            v
-        };
+        // Bound the body/SSE read too: the 30s above only covered the POST, so
+        // a server that opens an SSE stream and never emits the matching id (or
+        // stalls the body) would hang the tool call forever.
+        let payload = tokio::time::timeout(Duration::from_secs(120), async {
+            if content_type.contains("text/event-stream") {
+                read_sse_for_id(response, id).await
+            } else {
+                Ok(response.json::<Value>().await?)
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("MCP HTTP request timed out waiting for response {id}"))??;
 
         if let Some(err) = payload.get("error") {
             let msg = err
@@ -136,7 +142,9 @@ impl HttpClient {
             "method": method,
             "params": {},
         });
-        let response = self.post(&body).await?;
+        let response = tokio::time::timeout(Duration::from_secs(30), self.post(&body))
+            .await
+            .map_err(|_| anyhow::anyhow!("MCP notify '{method}' timed out"))??;
         if !response.status().is_success() && response.status().as_u16() != 202 {
             bail!("MCP notify '{method}' failed: HTTP {}", response.status());
         }
