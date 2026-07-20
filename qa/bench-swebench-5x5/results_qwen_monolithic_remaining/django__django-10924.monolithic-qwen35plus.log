@@ -1,0 +1,21 @@
+=== django__django-10924 (qwen3.5-plus) start 1784567532.3434002 ===
+e4d5f91581bf2e644712acf5e5e6f08fefd79087f8816e55712e83ac84a12d8b
+head_sha=ea920b62114864f2521a857c11be713fa8663586
+cmd: pirs-bench solve /testbed -t test_callable_path (model_fields.test_filepathfield.FilePathFieldTests) -k test_path (model_fields.test_filepathfield.FilePathFieldTests) --issue-file /tmp/issue.md --base-sha ea920b62114864f2521a857c11be713fa8663586 --provider openai-compat --model qwen3.5-plus --max-turns 40 --out /tmp/out.patch --base-url https://coding-intl.dashscope.aliyuncs.com/v1
+
+strategy: monolithic
+[2m2026-07-20T17:12:15.135613Z[0m [33m WARN[0m [2mpirs_bench::harness[0m[2m:[0m no runner confirmed; falling back to an agent-discovered runner (self-reported, not independently verified)
+[2m2026-07-20T17:12:37.245569Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m agent-discovered runner self-report for 2 id(s): [ReportedResult { id: "test_callable_path", outcome: "fail" }, ReportedResult { id: "test_path", outcome: "pass" }]
+[2m2026-07-20T17:12:37.245590Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m id never reported by the discovery agent: test_callable_path (model_fields.test_filepathfield.FilePathFieldTests)
+[2m2026-07-20T17:12:37.245593Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m id never reported by the discovery agent: test_path (model_fields.test_filepathfield.FilePathFieldTests)
+[WARNING: no runner detected — outcome is the discovery agent's own self-report, NOT independently verified by the harness]
+session: turns=0 tools=0 []
+tokens by model:
+  TOTAL: in=0 cache_r=0 cache_w=0 out=0 reasoning=0 total=0 — $0.0000
+timing (total 22.24s):
+  baseline: 22.12s (99%)
+  rollback: 0.09s (0%)
+  discover: 0.02s (0%)
+outcome: Failed(ReproFailed)
+
+exit_code=1 elapsed_s=22.3

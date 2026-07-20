@@ -1,0 +1,25 @@
+=== django__django-11283 (qwen3.5-plus) start 1784568600.165972 ===
+51b3e99d794a547aa940138a7079438b52cf1c997c2ac09e3a18bac4d74269e9
+head_sha=41ce74c6da569f7412795522361b5288d4c44dbe
+cmd: pirs-bench solve /testbed -t test_migrate_with_existing_target_permission (auth_tests.test_migrations.ProxyModelWithSameAppLabelTests) -k test_migrate_backwards (auth_tests.test_migrations.ProxyModelWithDifferentAppLabelTests) -k test_proxy_model_permissions_contenttype (auth_tests.test_migrations.ProxyModelWithDifferentAppLabelTests) -k test_user_has_now_proxy_model_permissions (auth_tests.test_migrations.ProxyModelWithDifferentAppLabelTests) -k test_user_keeps_same_permissions_after_migrating_backward (auth_tests.test_migrations.ProxyModelWithDifferentAppLabelTests) -k test_migrate_backwards (auth_tests.test_migrations.ProxyModelWithSameAppLabelTests) -k test_proxy_model_permissions_contenttype (auth_tests.test_migrations.ProxyModelWithSameAppLabelTests) -k test_user_keeps_same_permissions_after_migrating_backward (auth_tests.test_migrations.ProxyModelWithSameAppLabelTests) -k test_user_still_has_proxy_model_permissions (auth_tests.test_migrations.ProxyModelWithSameAppLabelTests) --issue-file /tmp/issue.md --base-sha 41ce74c6da569f7412795522361b5288d4c44dbe --provider openai-compat --model qwen3.5-plus --max-turns 40 --out /tmp/out.patch --base-url https://coding-intl.dashscope.aliyuncs.com/v1
+
+strategy: monolithic
+[2m2026-07-20T17:30:02.103469Z[0m [33m WARN[0m [2mpirs_bench::harness[0m[2m:[0m no runner confirmed; falling back to an agent-discovered runner (self-reported, not independently verified)
+[2m2026-07-20T17:32:20.416523Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m agent-discovered runner self-report for 9 id(s): [ReportedResult { id: "test_migrate_backwards (auth_tests.test_migrations.ProxyModelWithDifferentAppLabelTests)", outcome: "pass" }, ReportedResult { id: "test_migrate_backwards (auth_tests.test_migrations.ProxyModelWithSameAppLabelTests)", outcome: "pass" }, ReportedResult { id: "test_migrate_with_existing_target_permission (auth_tests.test_migrations.ProxyModelWithSameAppLabelTests)", outcome: "fail" }, ReportedResult { id: "test_proxy_model_permissions_contenttype (auth_tests.test_migrations.ProxyModelWithDifferentAppLabelTests)", outcome: "pass" }, ReportedResult { id: "test_proxy_model_permissions_contenttype (auth_tests.test_migrations.ProxyModelWithSameAppLabelTests)", outcome: "pass" }, ReportedResult { id: "test_user_has_now_proxy_model_permissions (auth_tests.test_migrations.ProxyModelWithDifferentAppLabelTests)", outcome: "pass" }, ReportedResult { id: "test_user_keeps_same_permissions_after_migrating_backward (auth_tests.test_migrations.ProxyModelWithDifferentAppLabelTests)", outcome: "pass" }, ReportedResult { id: "test_user_keeps_same_permissions_after_migrating_backward (auth_tests.test_migrations.ProxyModelWithSameAppLabelTests)", outcome: "pass" }, ReportedResult { id: "test_user_still_has_proxy_model_permissions (auth_tests.test_migrations.ProxyModelWithSameAppLabelTests)", outcome: "pass" }]
+[2m2026-07-20T17:35:56.350605Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m agent-discovered runner self-report for 1 id(s): [ReportedResult { id: "test_migrate_with_existing_target_permission", outcome: "pass" }]
+[2m2026-07-20T17:35:56.350623Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m id never reported by the discovery agent: test_migrate_with_existing_target_permission (auth_tests.test_migrations.ProxyModelWithSameAppLabelTests)
+[WARNING: no runner detected — outcome is the discovery agent's own self-report, NOT independently verified by the harness]
+session: turns=33 tools=31 [bash:14 read:10 grep:3 code_map:2 edit:1 write:1]
+tokens by model:
+  qwen3.5-plus: in=391639 cache_r=0 cache_w=0 out=7476 reasoning=3195 total=399115 — $?
+  TOTAL: in=391639 cache_r=0 cache_w=0 out=7476 reasoning=3195 total=399115 — $0.0000 (priced models only)
+timing (total 388.57s):
+  fix: 231.57s (60% n=2)
+  baseline: 138.32s (36%)
+  verify: 18.57s (5%)
+  rollback: 0.08s (0%)
+  discover: 0.02s (0%)
+  fix→tools: bash:20.85s code_map:4.65s grep:0.48s write:0.01s edit:0.01s read:0.00s
+outcome: Failed(FixNoFlip)
+
+exit_code=1 elapsed_s=388.7

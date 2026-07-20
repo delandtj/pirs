@@ -1,0 +1,22 @@
+=== astropy__astropy-12907 (qwen3.5-plus) start 1784564567.7532246 ===
+00928f3179b1e13d91f3c4a0a134ce96893c556a12282a689d33a0baedcbaa59
+head_sha=c7d12d42c5a1fae397b9a558c0f7df691affb046
+cmd: pirs-bench solve /testbed -t astropy/modeling/tests/test_separable.py::test_separable[compound_model6-result6] -t astropy/modeling/tests/test_separable.py::test_separable[compound_model9-result9] -k astropy/modeling/tests/test_separable.py::test_coord_matrix -k astropy/modeling/tests/test_separable.py::test_cdot -k astropy/modeling/tests/test_separable.py::test_cstack -k astropy/modeling/tests/test_separable.py::test_arith_oper -k astropy/modeling/tests/test_separable.py::test_separable[compound_model0-result0] -k astropy/modeling/tests/test_separable.py::test_separable[compound_model1-result1] -k astropy/modeling/tests/test_separable.py::test_separable[compound_model2-result2] -k astropy/modeling/tests/test_separable.py::test_separable[compound_model3-result3] -k astropy/modeling/tests/test_separable.py::test_separable[compound_model4-result4] -k astropy/modeling/tests/test_separable.py::test_separable[compound_model5-result5] -k astropy/modeling/tests/test_separable.py::test_separable[compound_model7-result7] -k astropy/modeling/tests/test_separable.py::test_separable[compound_model8-result8] -k astropy/modeling/tests/test_separable.py::test_custom_model_separable --issue-file /tmp/issue.md --base-sha c7d12d42c5a1fae397b9a558c0f7df691affb046 --provider openai-compat --model qwen3.5-plus --max-turns 40 --out /tmp/out.patch --base-url https://coding-intl.dashscope.aliyuncs.com/v1
+
+strategy: monolithic
+session: turns=15 tools=14 [bash:5 code_map:2 edit:2 read:2 run_tests:2 grep:1]
+tokens by model:
+  qwen3.5-plus: in=141416 cache_r=0 cache_w=0 out=3374 reasoning=1551 total=144790 — $?
+  TOTAL: in=141416 cache_r=0 cache_w=0 out=3374 reasoning=1551 total=144790 — $0.0000 (priced models only)
+timing (total 265.30s):
+  fix: 131.29s (49%)
+  bootstrap: 82.72s (31%)
+  discover: 44.63s (17%)
+  verify: 4.40s (2% n=2)
+  baseline: 2.25s (1%)
+  patch: 0.02s (0%)
+  fix→tools: run_tests:28.22s bash:4.10s code_map:3.04s edit:0.02s grep:0.00s read:0.00s
+outcome: Solved
+patch written to "/tmp/out.patch" (501 bytes)
+
+exit_code=0 elapsed_s=265.4

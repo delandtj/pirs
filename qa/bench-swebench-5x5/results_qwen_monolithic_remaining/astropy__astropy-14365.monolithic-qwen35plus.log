@@ -1,0 +1,22 @@
+=== astropy__astropy-14365 (qwen3.5-plus) start 1784566938.9570096 ===
+4cc127aa8aaeda26d7f266eaa5ebd1e4826cf8df689c5361ef5a381614eeb16b
+head_sha=5446c30df8f9b8e53f0a0c834027e8818e05e35f
+cmd: pirs-bench solve /testbed -t astropy/io/ascii/tests/test_qdp.py::test_roundtrip[True] -k astropy/io/ascii/tests/test_qdp.py::test_get_tables_from_qdp_file -k astropy/io/ascii/tests/test_qdp.py::test_roundtrip[False] -k astropy/io/ascii/tests/test_qdp.py::test_read_example -k astropy/io/ascii/tests/test_qdp.py::test_roundtrip_example -k astropy/io/ascii/tests/test_qdp.py::test_roundtrip_example_comma -k astropy/io/ascii/tests/test_qdp.py::test_read_write_simple -k astropy/io/ascii/tests/test_qdp.py::test_read_write_simple_specify_name -k astropy/io/ascii/tests/test_qdp.py::test_get_lines_from_qdp --issue-file /tmp/issue.md --base-sha 5446c30df8f9b8e53f0a0c834027e8818e05e35f --provider openai-compat --model qwen3.5-plus --max-turns 40 --out /tmp/out.patch --base-url https://coding-intl.dashscope.aliyuncs.com/v1
+
+strategy: monolithic
+session: turns=13 tools=14 [bash:5 edit:3 read:3 find:2 code_map:1]
+tokens by model:
+  qwen3.5-plus: in=170563 cache_r=0 cache_w=0 out=2666 reasoning=1493 total=173229 — $?
+  TOTAL: in=170563 cache_r=0 cache_w=0 out=2666 reasoning=1493 total=173229 — $0.0000 (priced models only)
+timing (total 280.25s):
+  fix: 175.44s (63%)
+  bootstrap: 58.32s (21%)
+  discover: 40.69s (15%)
+  verify: 3.79s (1% n=2)
+  baseline: 1.98s (1%)
+  patch: 0.03s (0%)
+  fix→tools: bash:4.53s code_map:3.12s edit:0.03s read:0.00s
+outcome: Solved
+patch written to "/tmp/out.patch" (988 bytes)
+
+exit_code=0 elapsed_s=280.3

@@ -1,0 +1,13 @@
+{
+  "id": "astropy__astropy-14365",
+  "model": "qwen3.5-plus",
+  "label": "monolithic-qwen35plus",
+  "image": "swebench/sweb.eval.x86_64.astropy_1776_astropy-14365:latest",
+  "container": "pirsbench-astropy--astropy-14365-monolithic-qwen35plus",
+  "exit_code": 0,
+  "elapsed_s": 280.3,
+  "solved": true,
+  "stderr_tail": "strategy: monolithic\nsession: turns=13 tools=14 [bash:5 edit:3 read:3 find:2 code_map:1]\ntokens by model:\n  qwen3.5-plus: in=170563 cache_r=0 cache_w=0 out=2666 reasoning=1493 total=173229 \u2014 $?\n  TOTAL: in=170563 cache_r=0 cache_w=0 out=2666 reasoning=1493 total=173229 \u2014 $0.0000 (priced models only)\ntiming (total 280.25s):\n  fix: 175.44s (63%)\n  bootstrap: 58.32s (21%)\n  discover: 40.69s (15%)\n  verify: 3.79s (1% n=2)\n  baseline: 1.98s (1%)\n  patch: 0.03s (0%)\n  fix\u2192tools: bash:4.53s code_map:3.12s edit:0.03s read:0.00s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (988 bytes)",
+  "patch_copied": true,
+  "patch_bytes": 988
+}

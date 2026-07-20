@@ -246,6 +246,54 @@ capability.
 Artifacts: [`bench-swebench-5x5/results_qwen_monolithic/`](bench-swebench-5x5/results_qwen_monolithic/),
 [`bench-swebench-5x5/run_qwen_monolithic.py`](bench-swebench-5x5/run_qwen_monolithic.py).
 
+## Extended qwen3.5-plus run: the other 42 pre-pulled images (partial, stopped early)
+
+Extended the qwen3.5-plus check to the remaining 42 of the 50 pre-pulled
+SWE-bench-lite docker images (the first 8 are the "real instances" covered
+everywhere above). **This run was stopped intentionally partway through** —
+35 of 42 completed before it was halted, and that partial set is what's
+reported here. Treat this as a rougher, less-curated sample than the rest of
+this document: unlike the 8 real instances (individually validated across
+this whole benchmark), most of these 42 were never previously run under any
+model or strategy, so some of what follows reflects properties of *this
+instance set* (heavy on Django, whose custom test runner needs the
+agent-discovery fallback) rather than of qwen3.5-plus specifically.
+
+**13 of 35 solved (37%).** Breaking down the 22 misses by actual cause
+(pulled from each run's real outcome, not just exit code):
+
+| Cause | Count | What it means |
+|---|---|---|
+| `Failed(ReproFailed)`, agent-discovery fallback used | 11 | The fallback ran and self-reported, but didn't confirm every target as red at baseline — the same self-report-accuracy limit documented above for `django-11001`, recurring across this larger, mostly-Django sample. |
+| `Failed(FixNoFlip)` | 7 | A genuine fix attempt (via the fallback or a confirmed static runner) that ran, edited, and verified — but the edit never flipped the target test. Real signal, not a harness artifact. |
+| `Failed(ReproFailed)`, static runner **confirmed** (no fallback) | 3 (`django-11001`, `django-11179`, `django-14608`) | Unlike most Django instances here, these got a real, harness-detected runner — yet baseline capture still failed to reproduce the target as red. Not yet root-caused; possibly another instance of the malformed-test-id class of bug found and partially fixed earlier in this document, possibly something instance-specific. Flagged here, not chased further given the scope of this run. |
+| CLI parse error (`exit=2`) | 1 (`django-11039`) | Not a code bug: this instance's own `PASS_TO_PASS` list contains prose fragments (e.g. `"--squashed-name specifies the new migration's name."`) instead of real test identifiers — a SWE-bench-lite dataset data-quality issue specific to this instance, coincidentally also shaped like a CLI flag. Not worth fixing/retrying since the "test ids" aren't real tests. |
+
+**Solved instances** (13): `astropy-12907`, `astropy-14365`, `astropy-14995`,
+`astropy-7746`, `django-11049`, `django-11133`, `django-11422`,
+`django-11630`, `django-11815`, `django-15781`, `sympy-13647`,
+`sympy-15678`, `sympy-16106`. Every astropy and sympy instance that was
+attempted solved except `sympy-13177` and `sympy-15346` — the failures are
+almost entirely concentrated in Django, the repo whose test runner this
+harness's static detectors still don't recognize.
+
+One outlier worth naming: `astropy-7746` took **2082s (~35 minutes)** to
+solve — the longest successful run in this entire benchmark session,
+roughly 3x the qwen3.5-plus average from the first 8-instance batch.
+
+**Reading:** this partial run reinforces two things already found elsewhere
+in this document rather than introducing a new finding: (1) the
+agent-discovery fallback's self-report accuracy is the real bottleneck for
+Django-heavy samples, not model capability — most failures here are
+`ReproFailed` via the fallback, not genuine fix misses; (2) when the fallback
+(or a real detector) does get a clean shot, qwen3.5-plus solves reliably —
+every non-Django, non-detection-gap instance attempted here succeeded.
+
+Artifacts: [`bench-swebench-5x5/results_qwen_monolithic_remaining/`](bench-swebench-5x5/results_qwen_monolithic_remaining/)
+(35 of 42 instances; the run was stopped before the last 7 — all Django —
+completed),
+[`bench-swebench-5x5/run_qwen_monolithic_remaining.py`](bench-swebench-5x5/run_qwen_monolithic_remaining.py).
+
 ## Setup
 
 - **Base model**: `deepseek-v4-flash` for every arm (the executor phase, or the

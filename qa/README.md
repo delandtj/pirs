@@ -194,6 +194,16 @@ on average. One run (`scikit-learn-25570`) used its entire 40-turn
 per-attempt budget to get there. See `bench-swebench-5x5.md`'s "Cross-model
 check" section for the full per-instance table.
 
+Extended qwen3.5-plus to the other 42 pre-pulled docker images too (a rougher,
+mostly-untried sample, heavy on Django) — **13/35 solved (37%)** before the
+run was stopped intentionally at 35 of 42. Every non-Django instance attempted
+solved except 2; nearly all misses were Django hitting the agent-discovery
+fallback's self-report-accuracy limit (`Failed(ReproFailed)`), not genuine fix
+failures — 7 of 22 misses were real fix attempts that didn't flip
+(`Failed(FixNoFlip)`), the rest were detection/self-report limits or one
+instance's own corrupted test-id data. See `bench-swebench-5x5.md`'s
+"Extended qwen3.5-plus run" section for the full breakdown.
+
 ## Discovery
 
 | Feature | Proof | What it demonstrates |

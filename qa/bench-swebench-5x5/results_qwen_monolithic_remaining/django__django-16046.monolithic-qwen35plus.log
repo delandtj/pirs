@@ -1,0 +1,26 @@
+=== django__django-16046 (qwen3.5-plus) start 1784565665.749402 ===
+78dfb6a5f943be941bda6991cd5425c8837d87eeb765a164ceffd8de6d3db34b
+head_sha=45fd48d59427912bcafe9ac0b55ece6bb290e64b
+cmd: pirs-bench solve /testbed -t test_empty (utils_tests.test_numberformat.TestNumberFormat) -k test_decimal_numbers (utils_tests.test_numberformat.TestNumberFormat) -k test_decimal_subclass (utils_tests.test_numberformat.TestNumberFormat) -k test_float_numbers (utils_tests.test_numberformat.TestNumberFormat) -k test_format_number (utils_tests.test_numberformat.TestNumberFormat) -k test_format_string (utils_tests.test_numberformat.TestNumberFormat) -k test_large_number (utils_tests.test_numberformat.TestNumberFormat) --issue-file /tmp/issue.md --base-sha 45fd48d59427912bcafe9ac0b55ece6bb290e64b --provider openai-compat --model qwen3.5-plus --max-turns 40 --out /tmp/out.patch --base-url https://coding-intl.dashscope.aliyuncs.com/v1
+
+strategy: monolithic
+[2m2026-07-20T16:41:08.538087Z[0m [33m WARN[0m [2mpirs_bench::harness[0m[2m:[0m no runner confirmed; falling back to an agent-discovered runner (self-reported, not independently verified)
+[2m2026-07-20T16:41:37.222517Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m agent-discovered runner self-report for 7 id(s): [ReportedResult { id: "test_decimal_numbers", outcome: "pass" }, ReportedResult { id: "test_decimal_subclass", outcome: "pass" }, ReportedResult { id: "test_empty", outcome: "fail" }, ReportedResult { id: "test_float_numbers", outcome: "pass" }, ReportedResult { id: "test_format_number", outcome: "pass" }, ReportedResult { id: "test_format_string", outcome: "pass" }, ReportedResult { id: "test_large_number", outcome: "pass" }]
+[2m2026-07-20T16:41:37.222540Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m id never reported by the discovery agent: test_decimal_numbers (utils_tests.test_numberformat.TestNumberFormat)
+[2m2026-07-20T16:41:37.222546Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m id never reported by the discovery agent: test_decimal_subclass (utils_tests.test_numberformat.TestNumberFormat)
+[2m2026-07-20T16:41:37.222550Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m id never reported by the discovery agent: test_empty (utils_tests.test_numberformat.TestNumberFormat)
+[2m2026-07-20T16:41:37.222553Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m id never reported by the discovery agent: test_float_numbers (utils_tests.test_numberformat.TestNumberFormat)
+[2m2026-07-20T16:41:37.222559Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m id never reported by the discovery agent: test_format_number (utils_tests.test_numberformat.TestNumberFormat)
+[2m2026-07-20T16:41:37.222563Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m id never reported by the discovery agent: test_format_string (utils_tests.test_numberformat.TestNumberFormat)
+[2m2026-07-20T16:41:37.222568Z[0m [33m WARN[0m [2mpirs_bench_runner::agent_runner[0m[2m:[0m id never reported by the discovery agent: test_large_number (utils_tests.test_numberformat.TestNumberFormat)
+[WARNING: no runner detected — outcome is the discovery agent's own self-report, NOT independently verified by the harness]
+session: turns=0 tools=0 []
+tokens by model:
+  TOTAL: in=0 cache_r=0 cache_w=0 out=0 reasoning=0 total=0 — $0.0000
+timing (total 28.82s):
+  baseline: 28.70s (100%)
+  rollback: 0.09s (0%)
+  discover: 0.03s (0%)
+outcome: Failed(ReproFailed)
+
+exit_code=1 elapsed_s=28.9

@@ -1,0 +1,13 @@
+{
+  "id": "sympy__sympy-15678",
+  "model": "qwen3.5-plus",
+  "label": "monolithic-qwen35plus",
+  "image": "swebench/sweb.eval.x86_64.sympy_1776_sympy-15678:latest",
+  "container": "pirsbench-sympy--sympy-15678-monolithic-qwen35plus",
+  "exit_code": 0,
+  "elapsed_s": 621.4,
+  "solved": true,
+  "stderr_tail": "strategy: monolithic\n\u001b[2m2026-07-20T16:51:57.355783Z\u001b[0m \u001b[33m WARN\u001b[0m \u001b[2mpirs_bench::harness\u001b[0m\u001b[2m:\u001b[0m no runner confirmed; falling back to an agent-discovered runner (self-reported, not independently verified)\n\u001b[2m2026-07-20T16:52:26.536786Z\u001b[0m \u001b[33m WARN\u001b[0m \u001b[2mpirs_bench_runner::agent_runner\u001b[0m\u001b[2m:\u001b[0m agent-discovered runner self-report for 4 id(s): [ReportedResult { id: \"test_centroid\", outcome: \"pass\" }, ReportedResult { id: \"test_convex_hull\", outcome: \"pass\" }, ReportedResult { id: \"test_idiff\", outcome: \"fail\" }, ReportedResult { id: \"test_intersection\", outcome: \"pass\" }]\n\u001b[2m2026-07-20T17:00:08.391543Z\u001b[0m \u001b[33m WARN\u001b[0m \u001b[2mpirs_bench_runner::agent_runner\u001b[0m\u001b[2m:\u001b[0m agent-discovered runner self-report for 1 id(s): [ReportedResult { id: \"test_idiff\", outcome: \"pass\" }]\n\u001b[2m2026-07-20T17:02:18.674084Z\u001b[0m \u001b[33m WARN\u001b[0m \u001b[2mpirs_bench_runner::agent_runner\u001b[0m\u001b[2m:\u001b[0m agent-discovered runner self-report for 4 id(s): [ReportedResult { id: \"test_centroid\", outcome: \"pass\" }, ReportedResult { id: \"test_convex_hull\", outcome: \"pass\" }, ReportedResult { id: \"test_idiff\", outcome: \"pass\" }, ReportedResult { id: \"test_intersection\", outcome: \"pass\" }]\n[WARNING: no runner detected \u2014 outcome is the discovery agent's own self-report, NOT independently verified by the harness]\nsession: turns=40 tools=40 [bash:26 read:5 edit:4 grep:4 run_tests:1]\ntokens by model:\n  qwen3.5-plus: in=484855 cache_r=0 cache_w=0 out=19230 reasoning=11549 total=504085 \u2014 $?\n  TOTAL: in=484855 cache_r=0 cache_w=0 out=19230 reasoning=11549 total=504085 \u2014 $0.0000 (priced models only)\ntiming (total 621.37s):\n  fix: 435.66s (70%)\n  verify: 156.49s (25% n=2)\n  baseline: 29.19s (5%)\n  discover: 0.02s (0%)\n  patch: 0.02s (0%)\n  fix\u2192tools: bash:15.62s grep:0.41s edit:0.04s run_tests:0.01s read:0.00s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (1295 bytes)",
+  "patch_copied": true,
+  "patch_bytes": 1295
+}

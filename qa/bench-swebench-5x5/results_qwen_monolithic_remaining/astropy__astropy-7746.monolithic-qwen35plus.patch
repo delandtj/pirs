@@ -1,0 +1,28 @@
+diff --git a/astropy/wcs/wcs.py b/astropy/wcs/wcs.py
+index d3a06f2b31..6ed2aa5b84 100644
+--- a/astropy/wcs/wcs.py
++++ b/astropy/wcs/wcs.py
+@@ -1212,6 +1212,14 @@ reduce these to 2 dimensions using the naxis kwarg.
+         """
+ 
+         def _return_list_of_arrays(axes, origin):
++            # Check for empty inputs before broadcasting - if any input is
++            # empty, return the original inputs unchanged without calling
++            # the underlying transformation
++            if any(ax.size == 0 for ax in axes):
++                if ra_dec_order and sky == 'output':
++                    return (axes[0], axes[1])
++                return list(axes)
++
+             try:
+                 axes = np.broadcast_arrays(*axes)
+             except ValueError:
+@@ -1235,6 +1243,8 @@ reduce these to 2 dimensions using the naxis kwarg.
+                 raise ValueError(
+                     "When providing two arguments, the array must be "
+                     "of shape (N, {0})".format(self.naxis))
++            if xy.shape[0] == 0:
++                return np.empty((0, self.naxis)).reshape(xy.shape)
+             if ra_dec_order and sky == 'input':
+                 xy = self._denormalize_sky(xy)
+             result = func(xy, origin)

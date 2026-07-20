@@ -1,0 +1,26 @@
+diff --git a/sympy/printing/mathml.py b/sympy/printing/mathml.py
+index 1aa0ee01a2..b7e709fef3 100644
+--- a/sympy/printing/mathml.py
++++ b/sympy/printing/mathml.py
+@@ -1006,6 +1006,21 @@ def _print_polylog(self, expr, exp=None):
+         mrow.appendChild(brac)
+         return mrow
+ 
++    def _print_Indexed(self, expr):
++        msub = self.dom.createElement('msub')
++        msub.appendChild(self._print(expr.base))
++        if len(expr.indices) == 1:
++            msub.appendChild(self._print(expr.indices[0]))
++        else:
++            mfenced = self.dom.createElement('mfenced')
++            for index in expr.indices:
++                mfenced.appendChild(self._print(index))
++            msub.appendChild(mfenced)
++        return msub
++
++    def _print_IndexedBase(self, expr):
++        return self._print(expr.label)
++
+     def _print_Basic(self, e):
+         mrow = self.dom.createElement('mrow')
+         mi = self.dom.createElement('mi')
