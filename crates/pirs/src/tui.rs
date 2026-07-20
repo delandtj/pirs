@@ -13,7 +13,7 @@ use crossterm::event::{
     MouseEventKind,
 };
 use crossterm::ExecutableCommand;
-use pirs_agent::{Agent, AgentEvent};
+use pirs_agent::{Agent, AgentEvent, AgentTool};
 use pirs_ai::Message;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -461,6 +461,25 @@ pub struct TuiOptions {
     pub approval_mode: ApprovalMode,
     pub approval_gate: Option<Arc<crate::approval::ApprovalGate>>,
     pub cwd: std::path::PathBuf,
+    /// Initial strategy name (e.g. plan-exec); changeable via `/strategy`.
+    pub strategy: Option<String>,
+    /// Initial plan-model; changeable via `/plan-model`.
+    pub plan_model: Option<String>,
+    pub verify: Option<String>,
+    pub max_attempts: Option<u32>,
+    /// Full tool set for strategy phase scoping.
+    pub strategy_tools: Vec<Arc<dyn AgentTool>>,
+    pub recorder: Option<Arc<pirs_agent::trace::Recorder>>,
+    pub trace_phase: Option<Arc<Mutex<String>>>,
+    /// Registry aliases for `/model` listing.
+    pub model_aliases: Vec<String>,
+}
+
+/// Live session controls shared between the UI thread and the agent worker.
+#[derive(Clone, Default)]
+struct SessionControls {
+    strategy: Option<String>,
+    plan_model: Option<String>,
 }
 
 struct App {
@@ -482,6 +501,9 @@ struct App {
     scroll: u16,
     viewport_height: u16,
     model: String,
+    plan_model: Option<String>,
+    strategy: Option<String>,
+    model_aliases: Vec<String>,
     approval_mode: String,
     cwd_label: String,
     usage_summary: String,
@@ -733,6 +755,10 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| ".".to_string());
     let cancel = opts.agent.cancel_handle();
+    let controls = Arc::new(Mutex::new(SessionControls {
+        strategy: opts.strategy.clone(),
+        plan_model: opts.plan_model.clone(),
+    }));
 
     let mut app = App {
         items: Vec::new(),
@@ -750,6 +776,9 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
         scroll: 0,
         viewport_height: 10,
         model,
+        plan_model: opts.plan_model.clone(),
+        strategy: opts.strategy.clone(),
+        model_aliases: opts.model_aliases.clone(),
         approval_mode: approval_name,
         cwd_label,
         usage_summary: String::new(),
@@ -768,25 +797,75 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
 
     app.push(ChatItem::System(welcome_banner(
         &app.model,
+        app.plan_model.as_deref(),
+        app.strategy.as_deref(),
         &app.approval_mode,
         &app.cwd_label,
     )));
 
-    let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (prompt_tx, prompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
     let agent = Arc::new(tokio::sync::Mutex::new(opts.agent));
     {
+        // Strategy runner is `!Send` (Rc in gate/phases). Drive the agent on a
+        // dedicated current-thread runtime so both plain prompts and strategies work.
         let agent = Arc::clone(&agent);
         let done_tx = done_tx.clone();
-        tokio::spawn(async move {
-            while let Some(text) = prompt_rx.recv().await {
-                let mut a = agent.lock().await;
-                let result = a.prompt(&text).await;
-                drop(a);
-                let _ = done_tx.send(result.is_ok());
-            }
-        });
+        let controls = Arc::clone(&controls);
+        let strategy_tools = opts.strategy_tools.clone();
+        let cwd = opts.cwd.clone();
+        let verify = opts.verify.clone();
+        let max_attempts = opts.max_attempts;
+        let recorder = opts.recorder.clone();
+        let trace_phase = opts.trace_phase.clone();
+        std::thread::Builder::new()
+            .name("pirs-tui-agent".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tui agent runtime");
+                rt.block_on(async move {
+                    let mut prompt_rx = prompt_rx;
+                    while let Some(text) = prompt_rx.recv().await {
+                        let (strategy, plan_model) = {
+                            let c = controls.lock().unwrap();
+                            (c.strategy.clone(), c.plan_model.clone())
+                        };
+                        let ok = if let Some(strat) = strategy {
+                            let a = agent.lock().await;
+                            let model = a.model.clone();
+                            let result = crate::run_strategy_turn(
+                                &a,
+                                &text,
+                                Some(strat.as_str()),
+                                None,
+                                &model,
+                                plan_model.as_deref(),
+                                strategy_tools.clone(),
+                                &cwd,
+                                verify.as_deref(),
+                                max_attempts,
+                                recorder.as_ref(),
+                                trace_phase.clone(),
+                            )
+                            .await;
+                            drop(a);
+                            result.is_ok()
+                        } else {
+                            let mut a = agent.lock().await;
+                            a.prompt(&text).await.is_ok()
+                        };
+                        let _ = done_tx.send(ok);
+                    }
+                });
+            })
+            .expect("spawn tui agent thread");
     }
+
+    // Shared handles for slash commands (model / plan-model / strategy).
+    let agent_for_cmds = Arc::clone(&agent);
+    let controls_for_cmds = Arc::clone(&controls);
 
     let mut events = crossterm::event::EventStream::new();
     let mut last_cursor: Option<(u16, u16)> = None;
@@ -823,7 +902,14 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
         match maybe_event {
             Ok(Some(Ok(Event::Key(key)))) => {
                 app.dirty = true;
-                if handle_key(&mut app, key, &prompt_tx) || app.should_quit {
+                if handle_key(
+                    &mut app,
+                    key,
+                    &prompt_tx,
+                    &agent_for_cmds,
+                    &controls_for_cmds,
+                ) || app.should_quit
+                {
                     break;
                 }
             }
@@ -882,10 +968,22 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn welcome_banner(model: &str, approval: &str, cwd: &str) -> String {
+fn welcome_banner(
+    model: &str,
+    plan_model: Option<&str>,
+    strategy: Option<&str>,
+    approval: &str,
+    cwd: &str,
+) -> String {
+    let plan = plan_model
+        .map(|p| format!("  ·  plan:{p}"))
+        .unwrap_or_default();
+    let strat = strategy
+        .map(|s| format!("  ·  strategy:{s}"))
+        .unwrap_or_default();
     format!(
-        "pirs  ·  {model}  ·  approval:{approval}  ·  {cwd}\n\
-         enter send · shift+enter newline · ↑↓ history · wheel/pgup scroll · ? help · esc cancel · ctrl-d quit"
+        "pirs  ·  {model}{plan}{strat}  ·  approval:{approval}  ·  {cwd}\n\
+         /model  /plan-model  /strategy  ·  enter send · ? help · esc cancel · ctrl-d quit"
     )
 }
 
@@ -915,6 +1013,8 @@ fn handle_key(
     app: &mut App,
     key: KeyEvent,
     prompt_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    agent: &Arc<tokio::sync::Mutex<Agent>>,
+    controls: &Arc<Mutex<SessionControls>>,
 ) -> bool {
     // Single-key approval answers when a gate is waiting.
     if app.pending_approval.lock().unwrap().is_some() {
@@ -989,7 +1089,7 @@ fn handle_key(
             insert_at_cursor(app, '\n');
         }
         (KeyCode::Enter, _) => {
-            submit_input(app, prompt_tx);
+            submit_input(app, prompt_tx, agent, controls);
         }
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
             app.input.clear();
@@ -1146,7 +1246,12 @@ fn history_down(app: &mut App) {
     }
 }
 
-fn submit_input(app: &mut App, prompt_tx: &tokio::sync::mpsc::UnboundedSender<String>) {
+fn submit_input(
+    app: &mut App,
+    prompt_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    agent: &Arc<tokio::sync::Mutex<Agent>>,
+    controls: &Arc<Mutex<SessionControls>>,
+) {
     let text = app.input.trim().to_string();
     if text.is_empty() {
         return;
@@ -1179,6 +1284,12 @@ fn submit_input(app: &mut App, prompt_tx: &tokio::sync::mpsc::UnboundedSender<St
         return;
     }
 
+    // Slash commands: model / plan-model / strategy (do not send to the agent).
+    if text.starts_with('/') {
+        handle_slash_command(app, agent, controls, &text);
+        return;
+    }
+
     if app.history.last().map(|h| h.as_str()) != Some(text.as_str()) {
         app.history.push(text.clone());
     }
@@ -1190,8 +1301,126 @@ fn submit_input(app: &mut App, prompt_tx: &tokio::sync::mpsc::UnboundedSender<St
         app.set_status("steering…");
     } else {
         app.running = true;
-        app.set_status("running");
+        let status = if app.strategy.is_some() {
+            format!(
+                "strategy:{} · model:{}{}",
+                app.strategy.as_deref().unwrap_or("?"),
+                app.model,
+                app.plan_model
+                    .as_ref()
+                    .map(|p| format!(" · plan:{p}"))
+                    .unwrap_or_default()
+            )
+        } else {
+            "running".into()
+        };
+        app.set_status(status);
         let _ = prompt_tx.send(text);
+    }
+}
+
+fn handle_slash_command(
+    app: &mut App,
+    agent: &Arc<tokio::sync::Mutex<Agent>>,
+    controls: &Arc<Mutex<SessionControls>>,
+    text: &str,
+) {
+    let (cmd, arg) = match text.split_once(char::is_whitespace) {
+        Some((c, a)) => (c, a.trim()),
+        None => (text, ""),
+    };
+    match cmd {
+        "/model" => {
+            if arg.is_empty() {
+                let aliases = if app.model_aliases.is_empty() {
+                    String::new()
+                } else {
+                    format!("\naliases: {}", app.model_aliases.join(", "))
+                };
+                app.notice(format!("model: {}{aliases}", app.model));
+            } else {
+                // Try_lock: agent worker may hold the lock while a turn runs.
+                match agent.try_lock() {
+                    Ok(mut a) => {
+                        a.model = arg.to_string();
+                        app.model = arg.to_string();
+                        app.notice(format!("model → {arg}"));
+                    }
+                    Err(_) => {
+                        app.notice("busy — wait for the current run to finish, then /model");
+                    }
+                }
+            }
+        }
+        "/plan-model" => {
+            if arg.is_empty() {
+                app.notice(format!(
+                    "plan-model: {}",
+                    app.plan_model.as_deref().unwrap_or("(none — phases use --model)")
+                ));
+            } else if arg == "none" || arg == "off" || arg == "clear" {
+                app.plan_model = None;
+                controls.lock().unwrap().plan_model = None;
+                app.notice("plan-model cleared");
+            } else {
+                app.plan_model = Some(arg.to_string());
+                controls.lock().unwrap().plan_model = Some(arg.to_string());
+                app.notice(format!("plan-model → {arg}"));
+            }
+        }
+        "/strategy" => {
+            if arg.is_empty() {
+                app.notice(format!(
+                    "strategy: {}\n  set: /strategy plan-exec | plan-critic-exec | monolithic\n  clear: /strategy none",
+                    app.strategy.as_deref().unwrap_or("(none — plain agent loop)")
+                ));
+            } else if arg == "none" || arg == "off" || arg == "clear" {
+                app.strategy = None;
+                controls.lock().unwrap().strategy = None;
+                app.notice("strategy cleared (plain agent loop)");
+            } else {
+                // Validate strategy resolves (builtin or file).
+                match pirs_rhai::discover::resolve_strategy(arg, &std::env::current_dir().unwrap_or_default()) {
+                    Ok(s) => {
+                        app.strategy = Some(s.name.clone());
+                        controls.lock().unwrap().strategy = Some(s.name.clone());
+                        app.notice(format!(
+                            "strategy → {} ({} step(s)); next message runs the strategy",
+                            s.name,
+                            s.steps.len()
+                        ));
+                    }
+                    Err(e) => {
+                        app.notice(format!("unknown strategy {arg:?}: {e}"));
+                    }
+                }
+            }
+        }
+        "/usage" => {
+            match agent.try_lock() {
+                Ok(a) => {
+                    let r = a.usage_report();
+                    let t = r.grand_total();
+                    let mut lines = vec![format!(
+                        "usage: {} calls · in {} · out {} · total {}",
+                        r.calls.len(),
+                        t.input,
+                        t.output,
+                        t.total_tokens
+                    )];
+                    for (m, u) in &r.by_model {
+                        lines.push(format!("  {m}: in {} out {}", u.input, u.output));
+                    }
+                    app.notice(lines.join("\n"));
+                }
+                Err(_) => app.notice("busy — try /usage after the run finishes"),
+            }
+        }
+        other => {
+            app.notice(format!(
+                "unknown command {other} — try /model /plan-model /strategy /usage /help"
+            ));
+        }
     }
 }
 
@@ -1309,18 +1538,30 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, app: &App, theme: &Theme)
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(20), Constraint::Length(usage_w.max(1))])
         .split(area);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" pirs ", theme.brand),
-            Span::styled("│ ", theme.dim),
-            Span::styled(app.model.clone(), theme.header_bg),
-            Span::styled("  ", theme.dim),
-            Span::styled(format!("● {}", app.approval_mode), theme.accent),
-            Span::styled("  ", theme.dim),
-            Span::styled(format!("~/{}", app.cwd_label), theme.header_bg),
-        ])),
-        parts[0],
-    );
+    let mut left = vec![
+        Span::styled(" pirs ", theme.brand),
+        Span::styled("│ ", theme.dim),
+        Span::styled(app.model.clone(), theme.header_bg),
+    ];
+    if let Some(p) = &app.plan_model {
+        left.push(Span::styled(" plan:", theme.dim));
+        left.push(Span::styled(p.clone(), theme.accent));
+    }
+    if let Some(s) = &app.strategy {
+        left.push(Span::styled(" strat:", theme.dim));
+        left.push(Span::styled(s.clone(), theme.accent));
+    }
+    left.push(Span::styled("  ", theme.dim));
+    left.push(Span::styled(
+        format!("● {}", app.approval_mode),
+        theme.accent,
+    ));
+    left.push(Span::styled("  ", theme.dim));
+    left.push(Span::styled(
+        format!("~/{}", app.cwd_label),
+        theme.header_bg,
+    ));
+    frame.render_widget(Paragraph::new(Line::from(left)), parts[0]);
     if !usage.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(usage, theme.dim)).alignment(Alignment::Right),
@@ -1680,7 +1921,22 @@ fn draw_help_overlay(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
         )),
         Line::from(""),
         Line::from(Span::styled("Commands", theme.heading)),
-        Line::from(Span::styled("  /help  /clear  /quit", theme.assistant_text)),
+        Line::from(Span::styled(
+            "  /model [id]       show/set exec model (aliases ok)",
+            theme.assistant_text,
+        )),
+        Line::from(Span::styled(
+            "  /plan-model [id]  strong planner model (none to clear)",
+            theme.assistant_text,
+        )),
+        Line::from(Span::styled(
+            "  /strategy [name]  plan-exec | plan-critic-exec | monolithic | none",
+            theme.assistant_text,
+        )),
+        Line::from(Span::styled(
+            "  /usage  /help  /clear  /quit",
+            theme.assistant_text,
+        )),
         Line::from(""),
         Line::from(Span::styled("  esc / q / ? to close", theme.dim)),
     ];
@@ -2314,6 +2570,9 @@ mod tests {
             scroll: 0,
             viewport_height: 10,
             model: "test-model".into(),
+            plan_model: None,
+            strategy: None,
+            model_aliases: Vec::new(),
             approval_mode: "auto".into(),
             cwd_label: ".".into(),
             usage_summary: String::new(),

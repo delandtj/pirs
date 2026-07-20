@@ -1228,11 +1228,14 @@ async fn main() -> anyhow::Result<()> {
     // Strategy/profile mode needs the full tool list after the agent takes it, to
     // re-scope tools per phase. Clone the Arc handles up front (cheap) only then.
     let strategy_mode = cli.strategy.is_some() || cli.profile.is_some();
-    let strategy_tools: Vec<Arc<dyn AgentTool>> = if strategy_mode {
-        tools.clone()
-    } else {
-        Vec::new()
-    };
+    // TUI can enable strategy mid-session, so keep a full tool clone whenever
+    // we might run phases (strategy/profile mode or TUI).
+    let strategy_tools: Vec<Arc<dyn AgentTool>> =
+        if strategy_mode || cli.mode == "tui" {
+            tools.clone()
+        } else {
+            Vec::new()
+        };
 
     let mut agent = Agent::new(provider, &cli.model)
         .with_system_prompt(system)
@@ -1394,6 +1397,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if cli.mode == "tui" {
+        let aliases: Vec<String> = model_registry
+            .models
+            .iter()
+            .map(|m| m.alias.clone())
+            .collect();
         return tui::run(tui::TuiOptions {
             agent,
             host,
@@ -1401,6 +1409,14 @@ async fn main() -> anyhow::Result<()> {
             approval_mode,
             approval_gate: Some(gate),
             cwd,
+            strategy: cli.strategy.clone(),
+            plan_model: cli.plan_model.clone(),
+            verify: cli.verify.clone(),
+            max_attempts: cli.max_attempts,
+            strategy_tools,
+            recorder: recorder.clone(),
+            trace_phase: Some(Arc::clone(&trace_phase)),
+            model_aliases: aliases,
         })
         .await;
     }
@@ -1543,7 +1559,7 @@ async fn run_verify_command(cmd: String, cwd: PathBuf) -> (bool, String) {
 /// with the failing command's output fed back as the next attempt's verdict.
 /// Returns a usage report spanning every phase of every attempt.
 #[allow(clippy::too_many_arguments)]
-async fn run_strategy_turn(
+pub(crate) async fn run_strategy_turn(
     base: &Agent,
     input: &str,
     strategy_arg: Option<&str>,
