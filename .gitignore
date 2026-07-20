@@ -1,5 +1,6 @@
 target/
 *.log
+__pycache__/
 .pirs/sessions/
 .pirs/memory.db
 .pirs/graph.db

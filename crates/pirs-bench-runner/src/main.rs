@@ -101,16 +101,6 @@ struct Common {
     /// outcome) to this file — the flight recorder for long sessions.
     #[arg(long, global = true)]
     trace: Option<PathBuf>,
-    /// Last-resort fallback when no static detector recognizes the project's
-    /// test framework at all (`Failed(RunnerUndetected)`): hand the test ids
-    /// to a bounded, edit-free sub-agent that investigates the repo and
-    /// self-reports pass/fail. UNLIKE every other runner in this harness,
-    /// this outcome is NOT independently re-verified — it is the discovery
-    /// agent's own report. Off by default; every instance where this path
-    /// fires is tagged in the output so results are never silently
-    /// indistinguishable from a harness-verified run.
-    #[arg(long, global = true)]
-    agent_discover_runner: bool,
 }
 
 impl Common {
@@ -371,9 +361,10 @@ fn solve_one(
         base_sha,
     };
 
-    // Only built (and only ever invoked by run_instance) when no static
-    // detector confirms a runner at all — see AgentDiscoveredRunner's own
-    // doc comment for the trust trade-off this makes.
+    // run_instance only ever calls this when no static detector confirms a
+    // runner at all — see AgentDiscoveredRunner's own doc comment for the
+    // trust trade-off this default fallback makes. If detection succeeds
+    // normally, this is never invoked and costs nothing.
     let make_fallback = move || -> Box<dyn TestRunner> {
         let rt = Arc::new(
             tokio::runtime::Runtime::new().expect("build tokio runtime for discovery agent"),
@@ -387,11 +378,6 @@ fn solve_one(
             ctx.common.max_turns,
         ))
     };
-    let fallback: Option<&dyn Fn() -> Box<dyn TestRunner>> = if ctx.common.agent_discover_runner {
-        Some(&make_fallback)
-    } else {
-        None
-    };
 
     let report = run_instance(
         &inst,
@@ -400,7 +386,7 @@ fn solve_one(
         &mut executor,
         ctx.common.max_attempts,
         workspace.as_ref(),
-        fallback,
+        Some(&make_fallback),
     )?;
     if report.used_undetected_fallback {
         eprintln!(
@@ -609,7 +595,6 @@ mod tests {
             no_strategy,
             profile: None,
             trace: None,
-            agent_discover_runner: false,
         }
     }
 

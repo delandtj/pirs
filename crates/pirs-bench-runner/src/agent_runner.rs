@@ -11,10 +11,10 @@
 //! independence ("the harness judges, the agent's own 'I'm done' is only
 //! advisory"). This runner is the one deliberate exception: its
 //! [`Snapshot`] is the discovery sub-agent's own self-report, not something
-//! the harness re-verified. It exists only as an opt-in fallback
-//! (`--agent-discover-runner`) for instances no static detector covers at
-//! all, and every id it reports is tagged in the trace so a reader can tell
-//! a self-reported outcome apart from a harness-confirmed one.
+//! the harness re-verified. It only ever activates as the last resort — when
+//! no static detector confirms anything at all — and every id it reports is
+//! tagged in the trace so a reader can tell a self-reported outcome apart
+//! from a harness-confirmed one.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -117,10 +117,44 @@ fn discovery_system_prompt(ids: &[TestId]) -> String {
     )
 }
 
+/// A cheap, best-effort fingerprint of the working tree's current state:
+/// HEAD's sha plus the raw working-tree diff against it. Equal fingerprints
+/// mean "nothing has changed since the last investigation" — falls back to a
+/// constant when git isn't available (e.g. not a repo), which degrades to
+/// "treat every call in this runner's lifetime as the same state" rather than
+/// failing outright.
+fn tree_fingerprint(work_dir: &std::path::Path) -> String {
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(work_dir)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    match (run(&["rev-parse", "HEAD"]), run(&["diff"])) {
+        (Some(head), Some(diff)) => format!("{head}\0{diff}"),
+        _ => "no-git".to_string(),
+    }
+}
+
 /// A [`TestRunner`] backed by a bounded, edit-free sub-agent instead of a
 /// deterministic subprocess. See the module doc for the trust trade-off this
-/// makes — opt-in, last-resort, and always for instances no static detector
-/// covers at all.
+/// makes — last-resort, only for instances no static detector covers at all.
+///
+/// **Caches its self-report per tree state** (see [`tree_fingerprint`]).
+/// Necessary, not just an optimization: [`crate::baseline`]'s stability check
+/// calls `.run()` twice expecting the SAME answer before trusting a baseline
+/// at all, and a fresh independent LLM investigation each time is neither
+/// deterministic nor guaranteed to agree with itself — two honest-but-
+/// differently-worded investigations of an unchanged tree would otherwise
+/// look "flaky" and abort every instance with `BaselineUnusable`. Caching by
+/// tree state also gives the right behavior for the opposite case: once a fix
+/// attempt actually edits the tree, the fingerprint changes and a fresh
+/// investigation runs, so the post-fix verify pass reflects the real new
+/// state rather than a stale pre-fix answer.
 pub struct AgentDiscoveredRunner {
     rt: Arc<tokio::runtime::Runtime>,
     provider: Arc<dyn LlmProvider>,
@@ -128,6 +162,14 @@ pub struct AgentDiscoveredRunner {
     api_key: String,
     tools: Vec<Arc<dyn AgentTool>>,
     max_turns: usize,
+    work_dir: PathBuf,
+    /// (tree fingerprint, exact requested ids, self-reported snapshot).
+    /// Keyed on the exact id set too, not just tree state — the driver calls
+    /// `.run()` with different scopes across a run (inner ring vs. the wider
+    /// regression ring), and reusing one scope's snapshot for another would
+    /// silently under/over-report coverage. A linear scan is fine: at most a
+    /// handful of distinct (fingerprint, ids) pairs exist per instance.
+    cache: Mutex<Vec<(String, Vec<TestId>, Snapshot)>>,
 }
 
 impl AgentDiscoveredRunner {
@@ -139,7 +181,7 @@ impl AgentDiscoveredRunner {
         work_dir: PathBuf,
         max_turns: usize,
     ) -> Self {
-        let mut tools = pirs_tools::default_tools(work_dir);
+        let mut tools = pirs_tools::default_tools(work_dir.clone());
         tools.retain(|t| !DISCOVERY_MUTATING.contains(&t.name()));
         AgentDiscoveredRunner {
             rt,
@@ -148,12 +190,25 @@ impl AgentDiscoveredRunner {
             api_key,
             tools,
             max_turns,
+            work_dir,
+            cache: Mutex::new(Vec::new()),
         }
     }
 }
 
 impl TestRunner for AgentDiscoveredRunner {
     fn run(&self, ids: &[TestId], _ring: Ring) -> anyhow::Result<Snapshot> {
+        let fingerprint = tree_fingerprint(&self.work_dir);
+        {
+            let cache = self.cache.lock().unwrap();
+            if let Some((_, _, snap)) = cache
+                .iter()
+                .find(|(fp, cached_ids, _)| fp == &fingerprint && cached_ids.as_slice() == ids)
+            {
+                return Ok(snap.clone());
+            }
+        }
+
         let slot: Arc<Mutex<Option<Vec<ReportedResult>>>> = Arc::new(Mutex::new(None));
         let mut tools = self.tools.clone();
         tools.push(Arc::new(ReportResultsTool { slot: slot.clone() }));
@@ -209,7 +264,12 @@ impl TestRunner for AgentDiscoveredRunner {
                 .unwrap_or(TestOutcome::NotCollected);
             (id.clone(), outcome)
         });
-        Ok(Snapshot::from_pairs(pairs))
+        let snap = Snapshot::from_pairs(pairs);
+        self.cache
+            .lock()
+            .unwrap()
+            .push((fingerprint, ids.to_vec(), snap.clone()));
+        Ok(snap)
     }
 }
 
@@ -283,5 +343,106 @@ mod tests {
             snap.get("m::never_mentioned"),
             Some(TestOutcome::NotCollected)
         );
+    }
+
+    /// Scripted responses in order; each call to `.stream()` pops the next one
+    /// and bumps a shared counter — lets a test assert exactly how many times
+    /// a fresh investigation actually ran, distinguishing that from a cache
+    /// hit that never calls the provider at all.
+    struct CountingProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        scripted: Mutex<std::collections::VecDeque<&'static str>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingProvider {
+        async fn stream(
+            &self,
+            model: &str,
+            _context: &Context,
+            _options: &CompletionOptions,
+            _cancel: CancellationToken,
+        ) -> futures::stream::BoxStream<'static, StreamEvent> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let outcome = self
+                .scripted
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or("unknown");
+            let msg = AssistantMessage {
+                content: vec![ContentBlock::ToolCall {
+                    id: "1".into(),
+                    name: "report_test_results".into(),
+                    arguments: json!({"results": [{"id": "m::t", "outcome": outcome}]}),
+                    thought_signature: None,
+                }],
+                stop_reason: StopReason::ToolUse,
+                model: model.to_string(),
+                ..Default::default()
+            };
+            Box::pin(futures::stream::iter(vec![
+                StreamEvent::Start,
+                StreamEvent::Done(Box::new(msg)),
+            ]))
+        }
+    }
+
+    fn git_init(dir: &std::path::Path) {
+        let sh = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+        };
+        sh(&["init", "-q"]);
+        sh(&["config", "user.email", "t@t"]);
+        sh(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("f.txt"), "v1\n").unwrap();
+        sh(&["add", "-A"]);
+        sh(&["commit", "-qm", "init"]);
+    }
+
+    #[test]
+    fn same_tree_state_reuses_the_cached_self_report_without_a_second_investigation() {
+        // This is the actual bug this cache exists to fix: baseline capture
+        // calls .run() twice expecting the SAME answer to confirm stability.
+        // Two independent, non-deterministic LLM investigations of an
+        // unchanged tree are not guaranteed to agree with themselves — which
+        // showed up live as every agent-discovered instance failing with
+        // BaselineUnusable. Caching by tree state means the second call never
+        // re-investigates at all.
+        let dir = tempfile::tempdir().unwrap();
+        git_init(dir.path());
+        let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: Arc<dyn LlmProvider> = Arc::new(CountingProvider {
+            calls: calls.clone(),
+            scripted: Mutex::new(std::collections::VecDeque::from(["fail", "pass"])),
+        });
+        let runner = AgentDiscoveredRunner::new(
+            rt,
+            provider,
+            "scripted".into(),
+            "k".into(),
+            dir.path().to_path_buf(),
+            5,
+        );
+        let ids = vec!["m::t".to_string()];
+
+        let first = runner.run(&ids, Ring::Inner).unwrap();
+        let second = runner.run(&ids, Ring::Inner).unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(first.get("m::t"), Some(TestOutcome::Fail));
+        assert_eq!(second.get("m::t"), first.get("m::t"));
+
+        // A real edit changes the tree's fingerprint — the next call must
+        // re-investigate (the whole point: post-fix verify must reflect the
+        // NEW state, never a stale pre-fix answer).
+        std::fs::write(dir.path().join("f.txt"), "v2\n").unwrap();
+        let third = runner.run(&ids, Ring::Inner).unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(third.get("m::t"), Some(TestOutcome::Pass));
     }
 }
