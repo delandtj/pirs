@@ -252,6 +252,11 @@ impl TestRunner for AgentDiscoveredRunner {
         ));
 
         let reported = slot.lock().unwrap().take().unwrap_or_default();
+        tracing::warn!(
+            "agent-discovered runner self-report for {} id(s): {:?}",
+            ids.len(),
+            reported
+        );
         let pairs = ids.iter().map(|id| {
             let outcome = reported
                 .iter()
@@ -262,6 +267,9 @@ impl TestRunner for AgentDiscoveredRunner {
                     _ => TestOutcome::NotCollected,
                 })
                 .unwrap_or(TestOutcome::NotCollected);
+            if outcome == TestOutcome::NotCollected {
+                tracing::warn!("id never reported by the discovery agent: {id}");
+            }
             (id.clone(), outcome)
         });
         let snap = Snapshot::from_pairs(pairs);
