@@ -1,0 +1,41 @@
+diff --git a/sphinx/ext/autosummary/generate.py b/sphinx/ext/autosummary/generate.py
+index a57c73fb7..34016098e 100644
+--- a/sphinx/ext/autosummary/generate.py
++++ b/sphinx/ext/autosummary/generate.py
+@@ -27,6 +27,7 @@ import sys
+ import warnings
+ from gettext import NullTranslations
+ from os import path
++from types import ModuleType
+ from typing import Any, Callable, Dict, List, NamedTuple, Set, Tuple, Union
+ 
+ from jinja2 import TemplateNotFound
+@@ -246,7 +247,27 @@ def generate_autosummary_content(name: str, obj: Any, parent: Any,
+     ns.update(context)
+ 
+     if doc.objtype == 'module':
+-        ns['members'] = dir(obj)
++        items = []  # type: List[str]
++        for member_name in dir(obj):
++            try:
++                value = safe_getattr(obj, member_name)
++            except AttributeError:
++                continue
++            if imported_members:
++                items.append(member_name)
++            elif getattr(value, '__module__', None) == obj.__name__:
++                items.append(member_name)
++            elif getattr(value, '__module__', None) is None and not isinstance(value, ModuleType):
++                items.append(member_name)
++        # filter members by autodoc-skip-member
++        filtered = []  # type: List[str]
++        for member_name in items:
++            value = safe_getattr(obj, member_name)
++            documenter = get_documenter(app, value, obj)
++            skipped = skip_member(value, member_name, documenter.objtype)
++            if skipped is not True:
++                filtered.append(member_name)
++        ns['members'] = filtered
+         ns['functions'], ns['all_functions'] = \
+             get_members(obj, {'function'}, imported=imported_members)
+         ns['classes'], ns['all_classes'] = \

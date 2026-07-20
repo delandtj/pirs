@@ -1,0 +1,13 @@
+{
+  "id": "scikit-learn__scikit-learn-12471",
+  "model": "qwen3.5-plus",
+  "label": "monolithic-qwen35plus",
+  "image": "swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-12471:latest",
+  "container": "pirsbench-scikit-learn--scikit-learn-12471-monolithic-qwen35plus",
+  "exit_code": 0,
+  "elapsed_s": 130.8,
+  "solved": true,
+  "stderr_tail": "strategy: monolithic\nsession: turns=15 tools=14 [bash:4 read:4 edit:3 code_map:2 find:1]\ntokens by model:\n  qwen3.5-plus: in=346097 cache_r=0 cache_w=0 out=3530 reasoning=1631 total=349627 \u2014 $?\n  TOTAL: in=346097 cache_r=0 cache_w=0 out=3530 reasoning=1631 total=349627 \u2014 $0.0000 (priced models only)\ntiming (total 130.76s):\n  fix: 105.92s (81%)\n  discover: 12.15s (9%)\n  bootstrap: 7.05s (5%)\n  verify: 3.07s (2% n=2)\n  baseline: 2.55s (2%)\n  patch: 0.02s (0%)\n  fix\u2192tools: bash:3.06s code_map:1.69s find:0.02s edit:0.01s read:0.00s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (882 bytes)",
+  "patch_copied": true,
+  "patch_bytes": 882
+}

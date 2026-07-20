@@ -1,0 +1,13 @@
+{
+  "id": "sphinx-doc__sphinx-7686",
+  "model": "qwen3.5-plus",
+  "label": "monolithic-qwen35plus",
+  "image": "swebench/sweb.eval.x86_64.sphinx-doc_1776_sphinx-7686:latest",
+  "container": "pirsbench-sphinx-doc--sphinx-7686-monolithic-qwen35plus",
+  "exit_code": 0,
+  "elapsed_s": 993.1,
+  "solved": true,
+  "stderr_tail": "strategy: monolithic\nsession: turns=93 tools=93 [bash:51 read:21 run_tests:10 edit:6 code_map:3 grep:2]\ntokens by model:\n  qwen3.5-plus: in=3762590 cache_r=0 cache_w=0 out=30067 reasoning=17104 total=3792657 \u2014 $?\n  TOTAL: in=3762590 cache_r=0 cache_w=0 out=30067 reasoning=17104 total=3792657 \u2014 $0.0000 (priced models only)\ntiming (total 992.99s):\n  fix: 972.15s (98% n=3)\n  verify: 8.23s (1% n=4)\n  baseline: 4.36s (0%)\n  discover: 4.27s (0%)\n  bootstrap: 3.77s (0%)\n  patch: 0.21s (0%)\n  fix\u2192tools: run_tests:16.08s bash:14.25s code_map:0.88s edit:0.03s grep:0.02s read:0.01s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (1773 bytes)",
+  "patch_copied": true,
+  "patch_bytes": 1773
+}

@@ -1,0 +1,41 @@
+diff --git a/sklearn/compose/_column_transformer.py b/sklearn/compose/_column_transformer.py
+index a26145117..7044bc04d 100644
+--- a/sklearn/compose/_column_transformer.py
++++ b/sklearn/compose/_column_transformer.py
+@@ -391,7 +391,8 @@ class ColumnTransformer(TransformerMixin, _BaseComposition):
+                     ).set_output(transform=output_config["dense"])
+                 elif trans == "drop":
+                     continue
+-                elif _is_empty_column_selection(columns):
++
++                if _is_empty_column_selection(columns):
+                     continue
+ 
+             if column_as_strings:
+@@ -588,14 +589,18 @@ class ColumnTransformer(TransformerMixin, _BaseComposition):
+             if old == "drop":
+                 trans = "drop"
+             elif old == "passthrough":
+-                # FunctionTransformer is present in list of transformers,
+-                # so get next transformer, but save original string
+-                func_transformer = next(fitted_transformers)
+-                trans = "passthrough"
+-
+-                # The fitted FunctionTransformer is saved in another attribute,
+-                # so it can be used during transform for set_output.
+-                self._name_to_fitted_passthrough[name] = func_transformer
++                if _is_empty_column_selection(column):
++                    # Empty passthrough transformers are not fitted
++                    trans = old
++                else:
++                    # FunctionTransformer is present in list of transformers,
++                    # so get next transformer, but save original string
++                    func_transformer = next(fitted_transformers)
++                    trans = "passthrough"
++
++                    # The fitted FunctionTransformer is saved in another attribute,
++                    # so it can be used during transform for set_output.
++                    self._name_to_fitted_passthrough[name] = func_transformer
+             elif _is_empty_column_selection(column):
+                 trans = old
+             else:

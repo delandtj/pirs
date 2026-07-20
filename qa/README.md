@@ -185,6 +185,15 @@ the way (the harness's baseline-stability check needs the same answer twice;
 two independent fresh LLM investigations of an unchanged tree don't
 reliably agree with themselves).
 
+**Cross-model check:** added `--provider openai-compat --base-url <url>` (any
+OpenAI-compatible endpoint, key via `CUSTOM_API_KEY`) and ran `monolithic`
+against **qwen3.5-plus** (DashScope) across the same 8 real instances —
+**8/8 solved**, matching deepseek-v4-flash's solve rate exactly, but slower on
+every single instance with no exceptions: ~3.6x the model-driven "fix" time
+on average. One run (`scikit-learn-25570`) used its entire 40-turn
+per-attempt budget to get there. See `bench-swebench-5x5.md`'s "Cross-model
+check" section for the full per-instance table.
+
 ## Discovery
 
 | Feature | Proof | What it demonstrates |

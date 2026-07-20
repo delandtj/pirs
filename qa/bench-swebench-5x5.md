@@ -197,6 +197,55 @@ Artifacts: [`bench-swebench-5x5/results_agent_discovery/`](bench-swebench-5x5/re
 (both live-test logs/results, the issue text, and the test patch for
 `django-11001`).
 
+## Cross-model check: monolithic vs qwen3.5-plus
+
+Every result above uses `deepseek-v4-flash`/`deepseek-v4-pro`. As a check that
+the harness (and the `monolithic` prompt fix specifically) isn't tuned to one
+model family, added `--provider openai-compat --base-url <url>` support
+(`crates/pirs-bench-runner/src/main.rs`) — any OpenAI-compatible endpoint, key
+via `CUSTOM_API_KEY` — and ran `monolithic` against **qwen3.5-plus** (DashScope
+international, `https://coding-intl.dashscope.aliyuncs.com/v1`) across the
+same 8 real instances.
+
+**Result: 8/8 solved** — matching `monolithic`'s deepseek-v4-flash solve rate
+exactly — but slower on **every single instance**, no exceptions, both in
+total wall-clock and in "fix" time alone (the model-driven portion, excluding
+harness-side discover/bootstrap/baseline/verify overhead):
+
+| Instance | Turns (ds→qwen) | Wall-clock (ds→qwen) | Fix-only time (ds→qwen) |
+|---|---|---|---|
+| astropy-6938 | 38→28 | 175.1s→327.2s | 145.0s→296.8s |
+| scikit-learn-12471 | 14→15 | 126.1s→130.8s | 103.0s→105.9s |
+| sphinx-7686 | 59→93 | 287.4s→993.1s | 269.6s→972.1s |
+| astropy-14182 | 21→32 | 321.0s→674.7s | 182.9s→509.0s |
+| matplotlib-23562 | 13→39 | 396.8s→1176.4s | 65.3s→846.9s |
+| matplotlib-26011 | 13→17 | 803.5s→979.6s | 161.5s→200.9s |
+| scikit-learn-25570 | 26→40 | 209.3s→1359.1s | 151.4s→1275.8s |
+| pytest-5221 | 47→27 | 264.7s→537.1s | 224.4s→492.3s |
+| **Avg** | 28.9→36.4 | 323s→772s | **162.9s→587.5s (3.6x)** |
+
+(qwen3.5-plus cost isn't included — it isn't in the harness's pricing table,
+so only token counts are available, not dollar figures. deepseek's own
+numbers here are from the corrected `monolithic` prompt, not the original
+buggy one.)
+
+`scikit-learn-25570` was the closest call: its 40 turns used the *entire*
+40-turn per-attempt budget — one more required turn and this would have been
+a miss, not a slow success. `sphinx-7686`'s 93 turns came from 3 verify-gated
+attempts (`fix: 972.15s n=3` in its log) — turn counts above are session
+totals across all attempts (`--max-attempts 3` default), not one attempt.
+
+**Reading:** on this sample, `monolithic`'s fixed prompt generalizes across
+model families — the 8/8 solve rate isn't an artifact of DeepSeek's specific
+behavior. But qwen3.5-plus needed meaningfully more model-driven time to
+reach the same outcome on every instance, roughly 3.6x on average when
+isolating actual "fix" time from harness overhead — a real, consistent cost
+difference between the two models on this benchmark, not solve-rate
+capability.
+
+Artifacts: [`bench-swebench-5x5/results_qwen_monolithic/`](bench-swebench-5x5/results_qwen_monolithic/),
+[`bench-swebench-5x5/run_qwen_monolithic.py`](bench-swebench-5x5/run_qwen_monolithic.py).
+
 ## Setup
 
 - **Base model**: `deepseek-v4-flash` for every arm (the executor phase, or the

@@ -1,0 +1,13 @@
+{
+  "id": "matplotlib__matplotlib-23562",
+  "model": "qwen3.5-plus",
+  "label": "monolithic-qwen35plus",
+  "image": "swebench/sweb.eval.x86_64.matplotlib_1776_matplotlib-23562:latest",
+  "container": "pirsbench-matplotlib--matplotlib-23562-monolithic-qwen35plus",
+  "exit_code": 0,
+  "elapsed_s": 1176.4,
+  "solved": true,
+  "stderr_tail": "strategy: monolithic\nsession: turns=39 tools=38 [read:14 grep:12 run_tests:7 code_map:2 edit:2 bash:1]\ntokens by model:\n  qwen3.5-plus: in=1178224 cache_r=0 cache_w=0 out=5321 reasoning=2093 total=1183545 \u2014 $?\n  TOTAL: in=1178224 cache_r=0 cache_w=0 out=5321 reasoning=2093 total=1183545 \u2014 $0.0000 (priced models only)\ntiming (total 1176.31s):\n  fix: 846.88s (72%)\n  bootstrap: 229.56s (20%)\n  baseline: 52.73s (4%)\n  verify: 32.44s (3% n=2)\n  discover: 14.67s (1%)\n  patch: 0.04s (0%)\n  fix\u2192tools: run_tests:562.71s bash:25.41s code_map:4.46s edit:0.02s grep:0.02s read:0.01s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (723 bytes)",
+  "patch_copied": true,
+  "patch_bytes": 723
+}

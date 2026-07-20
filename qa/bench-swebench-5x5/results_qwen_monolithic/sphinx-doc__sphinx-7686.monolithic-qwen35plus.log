@@ -1,0 +1,22 @@
+=== sphinx-doc__sphinx-7686 (qwen3.5-plus) start 1784560934.894865 ===
+f4ddc512a854340a83b6459b2c994ed070097eedd0fde06ccb72ebb9bf6f52e8
+head_sha=ac5795d00db16a70fd3b0112a3eedf43b524770e
+cmd: pirs-bench solve /testbed -t tests/test_ext_autosummary.py::test_autosummary_generate_content_for_module -t tests/test_ext_autosummary.py::test_autosummary_generate_content_for_module_skipped -k tests/test_ext_autosummary.py::test_mangle_signature -k tests/test_ext_autosummary.py::test_escaping -k tests/test_ext_autosummary.py::test_autosummary_generate -k tests/test_ext_autosummary.py::test_autosummary_generate_overwrite1 -k tests/test_ext_autosummary.py::test_autosummary_generate_overwrite2 -k tests/test_ext_autosummary.py::test_autosummary_recursive -k tests/test_ext_autosummary.py::test_autosummary_latex_table_colspec -k tests/test_ext_autosummary.py::test_import_by_name -k tests/test_ext_autosummary.py::test_autosummary_imported_members -k tests/test_ext_autosummary.py::test_generate_autosummary_docs_property -k tests/test_ext_autosummary.py::test_autosummary_skip_member -k tests/test_ext_autosummary.py::test_autosummary_template -k tests/test_ext_autosummary.py::test_empty_autosummary_generate -k tests/test_ext_autosummary.py::test_invalid_autosummary_generate -k tests/test_ext_autosummary.py::test_autogen --issue-file /tmp/issue.md --base-sha ac5795d00db16a70fd3b0112a3eedf43b524770e --provider openai-compat --model qwen3.5-plus --max-turns 40 --out /tmp/out.patch --base-url https://coding-intl.dashscope.aliyuncs.com/v1
+
+strategy: monolithic
+session: turns=93 tools=93 [bash:51 read:21 run_tests:10 edit:6 code_map:3 grep:2]
+tokens by model:
+  qwen3.5-plus: in=3762590 cache_r=0 cache_w=0 out=30067 reasoning=17104 total=3792657 — $?
+  TOTAL: in=3762590 cache_r=0 cache_w=0 out=30067 reasoning=17104 total=3792657 — $0.0000 (priced models only)
+timing (total 992.99s):
+  fix: 972.15s (98% n=3)
+  verify: 8.23s (1% n=4)
+  baseline: 4.36s (0%)
+  discover: 4.27s (0%)
+  bootstrap: 3.77s (0%)
+  patch: 0.21s (0%)
+  fix→tools: run_tests:16.08s bash:14.25s code_map:0.88s edit:0.03s grep:0.02s read:0.01s
+outcome: Solved
+patch written to "/tmp/out.patch" (1773 bytes)
+
+exit_code=0 elapsed_s=993.1

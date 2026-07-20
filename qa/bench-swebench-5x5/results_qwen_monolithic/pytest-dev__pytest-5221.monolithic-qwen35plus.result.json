@@ -1,0 +1,13 @@
+{
+  "id": "pytest-dev__pytest-5221",
+  "model": "qwen3.5-plus",
+  "label": "monolithic-qwen35plus",
+  "image": "swebench/sweb.eval.x86_64.pytest-dev_1776_pytest-5221:latest",
+  "container": "pirsbench-pytest-dev--pytest-5221-monolithic-qwen35plus",
+  "exit_code": 0,
+  "elapsed_s": 537.1,
+  "solved": true,
+  "stderr_tail": "strategy: monolithic\nsession: turns=27 tools=26 [bash:8 read:6 run_tests:5 grep:3 code_map:2 edit:2]\ntokens by model:\n  qwen3.5-plus: in=692404 cache_r=0 cache_w=0 out=5774 reasoning=3307 total=698178 \u2014 $?\n  TOTAL: in=692404 cache_r=0 cache_w=0 out=5774 reasoning=3307 total=698178 \u2014 $0.0000 (priced models only)\ntiming (total 537.00s):\n  fix: 492.26s (92%)\n  baseline: 18.56s (3%)\n  verify: 12.43s (2% n=2)\n  discover: 8.03s (1%)\n  bootstrap: 5.69s (1%)\n  patch: 0.03s (0%)\n  fix\u2192tools: run_tests:15.42s bash:13.96s code_map:0.76s edit:0.04s grep:0.01s read:0.01s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (1007 bytes)",
+  "patch_copied": true,
+  "patch_bytes": 1007
+}
