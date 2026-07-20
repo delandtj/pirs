@@ -9,6 +9,7 @@ use pirs_ai::{CompletionOptions, Message, OpenAiCompat};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
+mod acp_mode;
 mod approval;
 mod auth;
 mod blame;
@@ -35,7 +36,9 @@ struct Cli {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     prompt: Vec<String>,
 
-    /// Run mode: interactive REPL or headless JSONL-over-stdio RPC
+    /// Run mode: interactive REPL, TUI, headless JSONL-over-stdio RPC, or
+    /// ACP (Agent Client Protocol, JSON-RPC 2.0 over stdio — for editors
+    /// like Zed that embed agents directly)
     #[arg(long, default_value = "repl")]
     mode: String,
 
@@ -632,8 +635,18 @@ async fn main() -> anyhow::Result<()> {
         })
         .await;
     }
+    if cli.mode == "acp" {
+        return acp_mode::run(acp_mode::AcpOptions {
+            cwd: cwd.clone(),
+            model: cli.model.clone(),
+            base_url: cli.base_url.clone(),
+            api_key,
+            max_retries: cli.max_retries,
+        })
+        .await;
+    }
     if cli.mode != "repl" && cli.mode != "tui" {
-        bail!("unknown mode: {} (expected repl|rpc|tui)", cli.mode);
+        bail!("unknown mode: {} (expected repl|rpc|tui|acp)", cli.mode);
     }
 
     let provider: Arc<dyn pirs_ai::LlmProvider> = if cli.provider == "anthropic" {

@@ -6,7 +6,7 @@ Status: **alpha**. The core is ported and tested (150+ tests); Google provider a
 
 Providers: **OpenAI-compatible** (`--provider openai`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`) and **Anthropic** (`--provider anthropic`, `ANTHROPIC_API_KEY`) — both with streaming, tool calling, retries, and thinking-block support.
 
-UI: `--mode tui` (ratatui: streaming conversation, status line with model/approval/usage, steer-by-typing, inline approvals, PgUp/PgDn scroll) alongside the plain REPL (default) and `--mode rpc`.
+UI: `--mode tui` (ratatui: streaming conversation, status line with model/approval/usage, steer-by-typing, inline approvals, PgUp/PgDn scroll) alongside the plain REPL (default), `--mode rpc` (headless JSONL), and `--mode acp` (Agent Client Protocol, for editors that embed agents directly).
 
 Runtime features: auto-compaction with `/compact`, approval modes (`--approval auto|ask|yolo`, `/approval`), background jobs (`bash`/`delegate` with `background: true`, managed via `jobs`/`job_output`/`job_kill`/`job_steer`), goal support (`goal.rhai` pack), multi-model delegation (`delegate` with `model` override), token+cache accounting (`/usage`).
 
@@ -174,6 +174,28 @@ it non-interactively:
 OpenAI-compatible non-OpenAI endpoints), `max-turns`, and `strategy` are
 optional passthroughs.
 
+## ACP (Agent Client Protocol)
+
+`--mode acp` speaks [ACP](https://agentclientprotocol.com) — JSON-RPC 2.0
+over newline-delimited JSON on stdio — so editors that embed agents
+directly (Zed, and others as the ecosystem grows) can drive pirs instead of
+going through a terminal:
+
+```bash
+pirs --mode acp
+```
+
+Implemented: `initialize`, `session/new`, `session/prompt`, `session/cancel`;
+streamed `session/update` notifications (`agent_message_chunk` for assistant
+text, `tool_call`/`tool_call_update` for tool execution); every tool call is
+gated through the client via `session/request_permission` — there's no
+local auto/yolo/ask distinction in this mode. **Not yet implemented**:
+`fs/read_text_file`/`fs/write_text_file` (pirs's tools read/write the real
+filesystem directly, so an editor's unsaved-buffer content isn't visible to
+it), `terminal/*`, `session/load`, `authenticate`, and multiple concurrent
+sessions (a second `session/new` replaces the current one). See
+`crates/pirs/src/acp_mode.rs` for the full scope notes.
+
 ## Orchestrator
 
 Run fleets of headless agents (`pirs --mode rpc`, pi-compatible JSONL RPC):
@@ -194,7 +216,7 @@ pirs-orchestrator stop <id>
 | `pirs-agent` | agent loop, tool execution, hooks, events, steering/follow-up queues |
 | `pirs-tools` | `bash`, `read`, `edit`, `write`, `grep`, `find`, `ls` |
 | `pirs-rhai` | rhai extension host: script tools, tool policy, loop hooks |
-| `pirs` | CLI (`--mode repl\|rpc`) |
+| `pirs` | CLI (`--mode repl\|tui\|rpc\|acp`) |
 | `pirs-mcp` | MCP stdio client: JSON-RPC lifecycle, `mcp_*` tool adapter |
 | `pirs-orchestrator` | daemon + CLI for spawning/managing headless instances |
 
