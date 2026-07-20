@@ -214,6 +214,39 @@ pub fn claw_system_prompt() -> String {
         .into()
 }
 
+/// Whether a schedule job should be marked fired after a tick iteration.
+/// Dry-run (`run == false`) never advances; failed fires stay due for retry.
+pub fn should_mark_schedule_fired(run: bool, fire_succeeded: bool) -> bool {
+    run && fire_succeeded
+}
+
+/// Fail closed when no LLM API key is available (do not invent replies).
+pub fn require_llm_key(key: Option<&str>) -> anyhow::Result<()> {
+    if key.map(|k| !k.trim().is_empty()).unwrap_or(false) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "no API key for chat: set DASHSCOPE_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY \
+             (e.g. source ~/.pirs/secrets.env)"
+        )
+    }
+}
+
+/// Last non-empty assistant text from an agent turn, if any.
+pub fn extract_assistant_reply(msgs: &[pirs_ai::Message]) -> Option<String> {
+    msgs.iter().rev().find_map(|m| match m {
+        pirs_ai::Message::Assistant(a) => {
+            let t = a.text();
+            if t.trim().is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        }
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +297,76 @@ mod tests {
         assert_eq!(j.next_fire, now + 3600);
         assert!(store.due(now + 10).unwrap().is_empty());
         assert_eq!(store.due(now + 3600).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dry_run_tick_must_not_mark_fired() {
+        assert!(!should_mark_schedule_fired(false, true));
+        assert!(!should_mark_schedule_fired(false, false));
+    }
+
+    #[test]
+    fn failed_run_must_not_mark_fired() {
+        assert!(!should_mark_schedule_fired(true, false));
+        assert!(should_mark_schedule_fired(true, true));
+    }
+
+    #[test]
+    fn require_llm_key_fails_closed() {
+        assert!(require_llm_key(None).is_err());
+        assert!(require_llm_key(Some("")).is_err());
+        assert!(require_llm_key(Some("   ")).is_err());
+        assert!(require_llm_key(Some("sk-test")).is_ok());
+    }
+
+    #[test]
+    fn chat_does_not_invent_reply_text() {
+        // Empty assistant list → None (caller must not append "(no reply)").
+        assert!(extract_assistant_reply(&[]).is_none());
+        let empty = pirs_ai::Message::Assistant(pirs_ai::AssistantMessage {
+            content: vec![pirs_ai::ContentBlock::text("  ")],
+            ..Default::default()
+        });
+        assert!(extract_assistant_reply(&[empty]).is_none());
+        let ok = pirs_ai::Message::Assistant(pirs_ai::AssistantMessage {
+            content: vec![pirs_ai::ContentBlock::text("hello")],
+            ..Default::default()
+        });
+        assert_eq!(
+            extract_assistant_reply(&[ok]).as_deref(),
+            Some("hello")
+        );
+    }
+
+    /// Integration: if we refuse to append when extract returns None, session
+    /// stays user-only (no fake assistant line).
+    #[test]
+    fn no_fake_assistant_on_missing_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path().join("s.jsonl")).unwrap();
+        store.append("user", "hi").unwrap();
+        let reply = extract_assistant_reply(&[]);
+        assert!(reply.is_none());
+        // Do not append assistant when None — durable session has only user.
+        let lines = store.load().unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].role, "user");
+        assert!(!lines.iter().any(|l| l.role == "assistant"));
+    }
+
+    /// Real store path: dry-run policy leaves job due after "tick" without mark_fired.
+    #[test]
+    fn dry_run_leaves_job_enabled_in_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ScheduleStore::open(dir.path().join("schedule.json")).unwrap();
+        let job = store.add("stay due", 0, 0).unwrap();
+        let now = now_secs() + 1;
+        let due = store.due(now).unwrap();
+        assert_eq!(due.len(), 1);
+        // Simulate dry-run: would print, must NOT mark.
+        assert!(!should_mark_schedule_fired(false, false));
+        // Job still due.
+        assert_eq!(store.due(now).unwrap().len(), 1);
+        assert!(store.list().unwrap().iter().any(|j| j.id == job.id && j.enabled));
     }
 }

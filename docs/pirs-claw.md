@@ -31,9 +31,12 @@ pirs-claw schedule add --in-secs 60 "summarize my day"
 pirs-claw schedule add --every 3600 "hourly pulse"
 pirs-claw schedule list
 
-# Fire due jobs (dry-run prints prompts; --run actually chats)
+# Fire due jobs:
+#   tick          — dry-run: print due prompts only (does NOT mark fired)
+#   tick --run    — chat each due job; mark_fired only on success (failed stay due)
 pirs-claw schedule tick
 pirs-claw schedule tick --run
 ```
+
 
 State dir: `~/.pirs/claw/` (override with `--state-dir`).

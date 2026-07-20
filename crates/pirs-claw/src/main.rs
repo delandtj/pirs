@@ -7,7 +7,8 @@ use clap::{Parser, Subcommand};
 use pirs_ai::OpenAiCompat;
 use pirs_agent::Agent;
 use pirs_claw::{
-    claw_system_prompt, default_schedule_path, default_session_path, ScheduleStore, SessionStore,
+    claw_system_prompt, default_schedule_path, default_session_path, extract_assistant_reply,
+    require_llm_key, should_mark_schedule_fired, ScheduleStore, SessionStore,
 };
 
 #[derive(Parser)]
@@ -92,10 +93,13 @@ async fn main() -> anyhow::Result<()> {
             if text.is_empty() {
                 anyhow::bail!("usage: pirs-claw chat <message>");
             }
+            let (base, key) = resolve_provider_and_key();
+            // Fail before touching durable session if we cannot call an LLM.
+            require_llm_key(key.as_deref())?;
+
             let store = SessionStore::open(&session_path)?;
             store.append("user", &text)?;
 
-            let (base, key) = resolve_provider_and_key();
             let provider = Arc::new(OpenAiCompat::new(base).with_max_retries(2));
             let completion = pirs_ai::CompletionOptions {
                 api_key: key,
@@ -115,22 +119,16 @@ async fn main() -> anyhow::Result<()> {
                 agent.messages = msgs;
             }
 
-            let new_msgs = agent.prompt(&text).await?;
-            let reply = new_msgs
-                .iter()
-                .rev()
-                .find_map(|m| match m {
-                    pirs_ai::Message::Assistant(a) => {
-                        let t = a.text();
-                        if t.trim().is_empty() {
-                            None
-                        } else {
-                            Some(t)
-                        }
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| "(no reply)".into());
+            let new_msgs = match agent.prompt(&text).await {
+                Ok(m) => m,
+                Err(e) => {
+                    // Leave user line in session for continuity; never invent assistant text.
+                    anyhow::bail!("agent error (no assistant reply recorded): {e}");
+                }
+            };
+            let Some(reply) = extract_assistant_reply(&new_msgs) else {
+                anyhow::bail!("empty assistant reply (nothing recorded as assistant)");
+            };
             store.append("assistant", &reply)?;
             println!("{reply}");
             eprintln!("[pirs-claw: session {}]", store.path().display());
@@ -177,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     for j in due {
                         println!("due {}: {}", j.id, j.prompt);
-                        if run {
+                        let fire_ok = if run {
                             // Re-enter chat path for the job prompt.
                             let status = std::process::Command::new(std::env::current_exe()?)
                                 .arg("--model")
@@ -187,11 +185,23 @@ async fn main() -> anyhow::Result<()> {
                                 .arg("chat")
                                 .arg(&j.prompt)
                                 .status()?;
-                            if !status.success() {
-                                eprintln!("[tick] job {} failed", j.id);
+                            if status.success() {
+                                true
+                            } else {
+                                eprintln!(
+                                    "[tick] job {} failed (exit {:?}); leaving enabled for retry",
+                                    j.id,
+                                    status.code()
+                                );
+                                false
                             }
+                        } else {
+                            // Dry-run: print only — do not advance schedule.
+                            false
+                        };
+                        if should_mark_schedule_fired(run, fire_ok) {
+                            store.mark_fired(&j.id, now)?;
                         }
-                        store.mark_fired(&j.id, now)?;
                     }
                 }
             }
