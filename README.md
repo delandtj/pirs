@@ -48,7 +48,12 @@ api_key_env = "DASHSCOPE_API_KEY"
 alias = "deepseek-v4-flash"
 tier = "fast"
 ctx = 1000000
-serve = [{ backend = "openrouter", model = "deepseek/deepseek-v4-flash" }]
+# Ordered serve list: first is primary; later entries are failover if the
+# primary stream errors before producing content.
+serve = [
+  { backend = "openrouter", model = "deepseek/deepseek-v4-flash" },
+  { backend = "dashscope", model = "deepseek-v4-flash" },
+]
 
 [[models]]
 alias = "qwen-plus"
@@ -62,8 +67,13 @@ pirs --model qwen-plus --plan-model deepseek-v4-flash \
   --strategy plan-exec "fix the failing test"
 ```
 
-Unregistered `--model` names still hit the CLI default provider (`--provider` /
-`--base-url` / `OPENAI_API_KEY`).
+- **Backends** with secrets/URLs: prefer `~/.pirs/config.toml`. Project
+  `.pirs/config.toml` backends load only if the project is **trusted**
+  (`pirs trust`); otherwise they are ignored (aliases still load).
+- **Failover:** every `serve` entry after the first is tried when the previous
+  target fails before any text/tool content.
+- Unregistered `--model` names still hit the CLI default provider
+  (`--provider` / `--base-url` / `OPENAI_API_KEY`).
 
 Hardening flags: `--tool-diet`, `--sequential`, `--no-compaction` / `--context-window N`, `--max-retries N`. **`--weak`**: tool-diet + sequential + retries≥3 + default strategy `plan-exec` (one-shot) + bundled packs (`weak-model` → `context-janitor` → `env-doctor` → `goal`) + larger **repo_map** + **auto-verify** when a test ecosystem is detected. Pair with `--plan-model` for multi-model. **`edit_block`** accepts SEARCH/REPLACE. `delegate` supports a per-subagent `model` override. Auto-compaction summarizes old history. `extensions/weak-model.rhai` adds loop/thrash/stop-gate/plan pins; the host restores protected control pins if a context rewrite drops them.
 

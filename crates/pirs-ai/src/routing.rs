@@ -1,15 +1,20 @@
-//! Multi-backend model routing.
+//! Multi-backend model routing with ordered serve failover.
 //!
 //! A [`RoutingProvider`] maps **aliases** (what the user types as `--model` /
-//! `--plan-model`) onto concrete backends (base URL + API key + optional headers)
-//! and the remote model id that backend expects. Unregistered model names fall
-//! through to a default provider unchanged — so plain
-//! `--model gpt-4o --provider openai` still works with no registry config.
+//! `--plan-model`) onto an ordered list of serve targets (backend + remote
+//! model id). On stream failure (HTTP/error stop before any content), the next
+//! serve entry is tried. Unregistered model names fall through to a default
+//! provider unchanged.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{CompletionOptions, Context, LlmProvider, StreamEvent};
+use futures_util::StreamExt;
+
+use crate::{
+    AssistantMessage, CompletionOptions, ContentBlock, Context, LlmProvider, StopReason,
+    StreamEvent,
+};
 
 /// One authenticated API endpoint.
 #[derive(Debug, Clone)]
@@ -17,7 +22,6 @@ pub struct BackendSpec {
     pub name: String,
     pub kind: BackendKind,
     pub base_url: String,
-    /// Env var holding the API key (resolved at build time into `api_key`).
     pub api_key_env: Option<String>,
     pub api_key: Option<String>,
     pub headers: Vec<(String, String)>,
@@ -41,13 +45,18 @@ impl BackendKind {
     }
 }
 
-/// Alias → first serve target (failover list can be added later).
+/// One concrete serve target: backend name + remote model id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServeTarget {
+    pub backend: String,
+    pub remote_model: String,
+}
+
+/// Alias → ordered serve list (first is primary; rest are failover).
 #[derive(Debug, Clone)]
 pub struct ModelRoute {
     pub alias: String,
-    pub backend: String,
-    pub remote_model: String,
-    /// Optional metadata (not used for routing; useful for docs/UI later).
+    pub serve: Vec<ServeTarget>,
     pub tier: Option<String>,
     pub ctx: Option<u64>,
 }
@@ -56,7 +65,6 @@ pub struct ModelRoute {
 pub struct RoutingProvider {
     routes: HashMap<String, ModelRoute>,
     backends: HashMap<String, BackendHandle>,
-    /// Used when `model` is not a registered alias.
     default: BackendHandle,
 }
 
@@ -68,8 +76,6 @@ struct BackendHandle {
 }
 
 impl RoutingProvider {
-    /// Build a router. `default` is the CLI-constructed provider for unknown
-    /// model names; `backends` are named endpoints; `routes` map aliases.
     pub fn new(
         default: Arc<dyn LlmProvider>,
         default_api_key: Option<String>,
@@ -89,10 +95,7 @@ impl RoutingProvider {
                 },
             );
         }
-        let route_map = routes
-            .into_iter()
-            .map(|r| (r.alias.clone(), r))
-            .collect();
+        let route_map = routes.into_iter().map(|r| (r.alias.clone(), r)).collect();
         RoutingProvider {
             routes: route_map,
             backends: handles,
@@ -105,28 +108,42 @@ impl RoutingProvider {
         }
     }
 
-    /// Resolve an alias or raw model id into backend + remote model id.
-    pub fn resolve(&self, model_or_alias: &str) -> ResolvedRef {
+    /// Ordered serve targets for an alias, or a single synthetic target for raw ids.
+    pub fn targets_for(&self, model_or_alias: &str) -> Vec<ResolvedRef> {
         if let Some(route) = self.routes.get(model_or_alias) {
-            if let Some(backend) = self.backends.get(&route.backend) {
-                return ResolvedRef {
-                    alias: Some(route.alias.clone()),
-                    backend_name: backend.name.clone(),
-                    remote_model: route.remote_model.clone(),
-                    provider: Arc::clone(&backend.provider),
-                    api_key: backend.api_key.clone(),
-                    headers: backend.headers.clone(),
-                };
+            let mut out = Vec::new();
+            for t in &route.serve {
+                if let Some(backend) = self.backends.get(&t.backend) {
+                    out.push(ResolvedRef {
+                        alias: Some(route.alias.clone()),
+                        backend_name: backend.name.clone(),
+                        remote_model: t.remote_model.clone(),
+                        provider: Arc::clone(&backend.provider),
+                        api_key: backend.api_key.clone(),
+                        headers: backend.headers.clone(),
+                    });
+                }
+            }
+            if !out.is_empty() {
+                return out;
             }
         }
-        ResolvedRef {
+        vec![ResolvedRef {
             alias: None,
             backend_name: self.default.name.clone(),
             remote_model: model_or_alias.to_string(),
             provider: Arc::clone(&self.default.provider),
             api_key: self.default.api_key.clone(),
             headers: self.default.headers.clone(),
-        }
+        }]
+    }
+
+    /// First resolve (primary serve) — for diagnostics.
+    pub fn resolve(&self, model_or_alias: &str) -> ResolvedRef {
+        self.targets_for(model_or_alias)
+            .into_iter()
+            .next()
+            .expect("targets_for always returns at least one")
     }
 
     pub fn has_alias(&self, name: &str) -> bool {
@@ -150,6 +167,63 @@ pub struct ResolvedRef {
     pub headers: Vec<(String, String)>,
 }
 
+fn options_for(resolved: &ResolvedRef, options: &CompletionOptions) -> CompletionOptions {
+    let mut opts = options.clone();
+    if let Some(key) = resolved.api_key.clone() {
+        opts.api_key = Some(key);
+    }
+    let mut headers = resolved.headers.clone();
+    headers.extend(opts.extra_headers.iter().cloned());
+    opts.extra_headers = headers;
+    opts
+}
+
+/// Classify early stream events: hard fail → try next serve; content → commit.
+enum Probe {
+    Fail(String),
+    Commit(Vec<StreamEvent>),
+}
+
+async fn probe_stream(
+    mut stream: futures_util::stream::BoxStream<'static, StreamEvent>,
+) -> (Probe, futures_util::stream::BoxStream<'static, StreamEvent>) {
+    let mut buffered = Vec::new();
+    loop {
+        match stream.next().await {
+            None => {
+                if buffered.is_empty() {
+                    return (Probe::Fail("empty stream".into()), stream);
+                }
+                return (Probe::Commit(buffered), stream);
+            }
+            Some(StreamEvent::Error(e)) => {
+                return (Probe::Fail(e), stream);
+            }
+            Some(StreamEvent::Done(m))
+                if m.stop_reason == StopReason::Error
+                    || m.error_message.as_ref().is_some_and(|e| !e.is_empty()) =>
+            {
+                let msg = m
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "provider error".into());
+                return (Probe::Fail(msg), stream);
+            }
+            Some(ev @ StreamEvent::TextDelta(_))
+            | Some(ev @ StreamEvent::ThinkingDelta(_))
+            | Some(ev @ StreamEvent::ToolCallDelta)
+            | Some(ev @ StreamEvent::Done(_)) => {
+                buffered.push(ev);
+                return (Probe::Commit(buffered), stream);
+            }
+            Some(ev @ StreamEvent::Start) => {
+                buffered.push(ev);
+                // keep reading until content or error
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl LlmProvider for RoutingProvider {
     async fn stream(
@@ -159,30 +233,70 @@ impl LlmProvider for RoutingProvider {
         options: &CompletionOptions,
         cancel: tokio_util::sync::CancellationToken,
     ) -> futures_util::stream::BoxStream<'static, StreamEvent> {
-        let resolved = self.resolve(model);
-        let mut opts = options.clone();
-        // Backend key wins when set (each subscription has its own key).
-        if let Some(key) = resolved.api_key.clone() {
-            opts.api_key = Some(key);
-        }
-        // Backend headers first, then any per-call extras (call extras win on
-        // duplicate keys only if we append after — last write in reqwest header
-        // loop wins if we allow dups; keep backend headers then call).
-        let mut headers = resolved.headers;
-        headers.extend(opts.extra_headers.iter().cloned());
-        opts.extra_headers = headers;
+        let targets = self.targets_for(model);
+        let mut last_err = String::from("no serve targets");
+        let n = targets.len();
 
-        resolved
-            .provider
-            .stream(&resolved.remote_model, context, &opts, cancel)
-            .await
+        for (i, resolved) in targets.into_iter().enumerate() {
+            if cancel.is_cancelled() {
+                return Box::pin(futures_util::stream::iter(vec![StreamEvent::Done(
+                    Box::new(AssistantMessage {
+                        content: vec![],
+                        stop_reason: StopReason::Aborted,
+                        ..Default::default()
+                    }),
+                )]));
+            }
+            let opts = options_for(&resolved, options);
+            let stream = resolved
+                .provider
+                .stream(&resolved.remote_model, context, &opts, cancel.clone())
+                .await;
+            let (probe, rest) = probe_stream(stream).await;
+            match probe {
+                Probe::Fail(e) => {
+                    last_err = format!(
+                        "backend {} model {}: {e}",
+                        resolved.backend_name, resolved.remote_model
+                    );
+                    if i + 1 < n {
+                        tracing::warn!(
+                            alias = model,
+                            backend = %resolved.backend_name,
+                            remote = %resolved.remote_model,
+                            error = %e,
+                            "serve target failed; trying next"
+                        );
+                        eprintln!(
+                            "[model registry: {} via {} failed ({e}); trying next serve target]",
+                            resolved.remote_model, resolved.backend_name
+                        );
+                    }
+                    continue;
+                }
+                Probe::Commit(buffered) => {
+                    return Box::pin(futures_util::stream::iter(buffered).chain(rest));
+                }
+            }
+        }
+
+        // All serve targets failed.
+        Box::pin(futures_util::stream::iter(vec![
+            StreamEvent::Error(last_err.clone()),
+            StreamEvent::Done(Box::new(AssistantMessage {
+                content: vec![ContentBlock::text(format!("all serve targets failed: {last_err}"))],
+                stop_reason: StopReason::Error,
+                error_message: Some(last_err),
+                ..Default::default()
+            })),
+        ]))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AssistantMessage, ContentBlock, StopReason};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     struct CaptureProvider {
@@ -209,9 +323,68 @@ mod tests {
                 stop_reason: StopReason::Stop,
                 ..Default::default()
             };
-            Box::pin(futures_util::stream::iter(vec![StreamEvent::Done(
-                Box::new(msg),
-            )]))
+            Box::pin(futures_util::stream::iter(vec![
+                StreamEvent::Start,
+                StreamEvent::TextDelta(format!("{}:{}", self.label, model)),
+                StreamEvent::Done(Box::new(msg)),
+            ]))
+        }
+    }
+
+    /// Fails the first `fail_count` calls with Error Done, then succeeds.
+    struct FailThenOk {
+        calls: AtomicUsize,
+        fail_count: usize,
+        label: String,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for FailThenOk {
+        async fn stream(
+            &self,
+            model: &str,
+            _context: &Context,
+            _options: &CompletionOptions,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> futures_util::stream::BoxStream<'static, StreamEvent> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_count {
+                let msg = AssistantMessage {
+                    content: vec![],
+                    stop_reason: StopReason::Error,
+                    error_message: Some(format!("fail-{n}")),
+                    ..Default::default()
+                };
+                return Box::pin(futures_util::stream::iter(vec![StreamEvent::Done(
+                    Box::new(msg),
+                )]));
+            }
+            let text = format!("{}:{}", self.label, model);
+            let msg = AssistantMessage {
+                content: vec![ContentBlock::text(&text)],
+                stop_reason: StopReason::Stop,
+                ..Default::default()
+            };
+            Box::pin(futures_util::stream::iter(vec![
+                StreamEvent::Start,
+                StreamEvent::TextDelta(text.clone()),
+                StreamEvent::Done(Box::new(msg)),
+            ]))
+        }
+    }
+
+    fn route(alias: &str, serve: Vec<(&str, &str)>) -> ModelRoute {
+        ModelRoute {
+            alias: alias.into(),
+            serve: serve
+                .into_iter()
+                .map(|(b, m)| ServeTarget {
+                    backend: b.into(),
+                    remote_model: m.into(),
+                })
+                .collect(),
+            tier: None,
+            ctx: None,
         }
     }
 
@@ -254,24 +427,14 @@ mod tests {
             vec![],
             backends,
             vec![
-                ModelRoute {
-                    alias: "deepseek-v4-flash".into(),
-                    backend: "openrouter".into(),
-                    remote_model: "deepseek/deepseek-v4-flash".into(),
-                    tier: Some("fast".into()),
-                    ctx: Some(1_000_000),
-                },
-                ModelRoute {
-                    alias: "qwen-plus".into(),
-                    backend: "dashscope".into(),
-                    remote_model: "qwen3.5-plus".into(),
-                    tier: None,
-                    ctx: None,
-                },
+                route(
+                    "deepseek-v4-flash",
+                    vec![("openrouter", "deepseek/deepseek-v4-flash")],
+                ),
+                route("qwen-plus", vec![("dashscope", "qwen3.5-plus")]),
             ],
         );
 
-        // Strong plan alias → openrouter remote + key
         let _ = router
             .stream(
                 "deepseek-v4-flash",
@@ -286,7 +449,6 @@ mod tests {
             .next()
             .await;
 
-        // Weak exec alias → dashscope
         let _ = router
             .stream(
                 "qwen-plus",
@@ -298,7 +460,6 @@ mod tests {
             .next()
             .await;
 
-        // Unknown → default, model id unchanged
         let _ = router
             .stream(
                 "gpt-4o",
@@ -326,8 +487,6 @@ mod tests {
         assert_eq!(def[0].0, "gpt-4o");
     }
 
-    /// Simulates `--model qwen-plus --plan-model deepseek-v4-flash`: two sequential
-    /// phase calls on the same router must hit different backends/keys.
     #[tokio::test]
     async fn strong_plan_weak_exec_aliases_use_distinct_backends() {
         let openrouter = Arc::new(CaptureProvider {
@@ -361,24 +520,14 @@ mod tests {
             vec![],
             backends,
             vec![
-                ModelRoute {
-                    alias: "deepseek-v4-flash".into(),
-                    backend: "openrouter".into(),
-                    remote_model: "deepseek/deepseek-v4-flash".into(),
-                    tier: None,
-                    ctx: None,
-                },
-                ModelRoute {
-                    alias: "qwen-plus".into(),
-                    backend: "dashscope".into(),
-                    remote_model: "qwen3.5-plus".into(),
-                    tier: None,
-                    ctx: None,
-                },
+                route(
+                    "deepseek-v4-flash",
+                    vec![("openrouter", "deepseek/deepseek-v4-flash")],
+                ),
+                route("qwen-plus", vec![("dashscope", "qwen3.5-plus")]),
             ],
         );
 
-        // plan phase
         let _ = router
             .stream(
                 "deepseek-v4-flash",
@@ -389,7 +538,6 @@ mod tests {
             .await
             .next()
             .await;
-        // exec phase
         let _ = router
             .stream(
                 "qwen-plus",
@@ -401,13 +549,116 @@ mod tests {
             .next()
             .await;
 
-        assert_eq!(openrouter.seen.lock().unwrap()[0].0, "deepseek/deepseek-v4-flash");
-        assert_eq!(openrouter.seen.lock().unwrap()[0].1.as_deref(), Some("or-key"));
+        assert_eq!(
+            openrouter.seen.lock().unwrap()[0].0,
+            "deepseek/deepseek-v4-flash"
+        );
+        assert_eq!(
+            openrouter.seen.lock().unwrap()[0].1.as_deref(),
+            Some("or-key")
+        );
         assert_eq!(dashscope.seen.lock().unwrap()[0].0, "qwen3.5-plus");
-        assert_eq!(dashscope.seen.lock().unwrap()[0].1.as_deref(), Some("ds-key"));
+        assert_eq!(
+            dashscope.seen.lock().unwrap()[0].1.as_deref(),
+            Some("ds-key")
+        );
+    }
+
+    #[tokio::test]
+    async fn failover_tries_second_serve_when_first_errors() {
+        let primary = Arc::new(FailThenOk {
+            calls: AtomicUsize::new(0),
+            fail_count: 100, // always fail
+            label: "primary".into(),
+        });
+        let secondary = Arc::new(FailThenOk {
+            calls: AtomicUsize::new(0),
+            fail_count: 0, // always ok
+            label: "secondary".into(),
+        });
+        let mut backends = HashMap::new();
+        backends.insert(
+            "a".into(),
+            (Arc::clone(&primary) as Arc<dyn LlmProvider>, None, vec![]),
+        );
+        backends.insert(
+            "b".into(),
+            (
+                Arc::clone(&secondary) as Arc<dyn LlmProvider>,
+                Some("b-key".into()),
+                vec![],
+            ),
+        );
+        let router = RoutingProvider::new(
+            Arc::clone(&primary) as Arc<dyn LlmProvider>,
+            None,
+            vec![],
+            backends,
+            vec![route(
+                "flash",
+                vec![("a", "model-a"), ("b", "model-b")],
+            )],
+        );
+
+        let mut stream = router
+            .stream(
+                "flash",
+                &Context::default(),
+                &CompletionOptions::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await;
+        let mut texts = Vec::new();
+        while let Some(ev) = stream.next().await {
+            if let StreamEvent::TextDelta(t) = ev {
+                texts.push(t);
+            }
+        }
+        assert!(
+            texts.iter().any(|t| t.contains("secondary:model-b")),
+            "failover must reach secondary: {texts:?}"
+        );
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(secondary.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn all_serve_targets_failing_surfaces_error() {
+        let primary = Arc::new(FailThenOk {
+            calls: AtomicUsize::new(0),
+            fail_count: 100,
+            label: "a".into(),
+        });
+        let mut backends = HashMap::new();
+        backends.insert(
+            "a".into(),
+            (Arc::clone(&primary) as Arc<dyn LlmProvider>, None, vec![]),
+        );
+        let router = RoutingProvider::new(
+            Arc::clone(&primary) as Arc<dyn LlmProvider>,
+            None,
+            vec![],
+            backends,
+            vec![route("x", vec![("a", "m1"), ("a", "m2")])],
+        );
+        let mut stream = router
+            .stream(
+                "x",
+                &Context::default(),
+                &CompletionOptions::default(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await;
+        let mut saw_error = false;
+        while let Some(ev) = stream.next().await {
+            if matches!(ev, StreamEvent::Error(_)) {
+                saw_error = true;
+            }
+            if let StreamEvent::Done(m) = ev {
+                assert_eq!(m.stop_reason, StopReason::Error);
+            }
+        }
+        assert!(saw_error);
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 2);
     }
 }
-
-// StreamExt for .next() in tests
-#[cfg(test)]
-use futures_util::StreamExt;

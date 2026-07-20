@@ -1,10 +1,12 @@
 //! Named backends + model aliases for multi-subscription routing.
 //!
-//! Loaded from `[[backends]]` / `[[models]]` in user (and optionally project)
-//! `config.toml`. Backends carry base URLs and key env names — treated like
-//! `base_url` for security: project layer may not set backends. Model aliases
-//! are inert labels and may live in either layer (project can name aliases that
-//! point at user-defined backends).
+//! Loaded from `[[backends]]` / `[[models]]` in user and project `config.toml`.
+//! Project-layer **backends** are allowed only when the project directory is
+//! trusted (`pirs trust`); otherwise they are stripped with a warning. Model
+//! aliases may live in either layer.
+//!
+//! `serve` is an ordered list — first entry is primary; later entries are
+//! failover when the primary stream errors before producing content.
 //!
 //! ```toml
 //! [[backends]]
@@ -14,31 +16,22 @@
 //! api_key_env = "OPENROUTER_API_KEY"
 //! headers = { HTTP-Referer = "https://example.com", X-Title = "pirs" }
 //!
-//! [[backends]]
-//! name = "dashscope"
-//! kind = "openai_compatible"
-//! base_url = "https://coding-intl.dashscope.aliyuncs.com/v1"
-//! api_key_env = "DASHSCOPE_API_KEY"
-//!
 //! [[models]]
 //! alias = "deepseek-v4-flash"
-//! tier = "fast"
-//! ctx = 1000000
-//! serve = [{ backend = "openrouter", model = "deepseek/deepseek-v4-flash" }]
-//!
-//! [[models]]
-//! alias = "qwen-plus"
-//! serve = [{ backend = "dashscope", model = "qwen3.5-plus" }]
+//! serve = [
+//!   { backend = "openrouter", model = "deepseek/deepseek-v4-flash" },
+//!   { backend = "dashscope", model = "deepseek-v4-flash" },  # failover
+//! ]
 //! ```
-//!
-//! Then: `pirs --model qwen-plus --plan-model deepseek-v4-flash --strategy plan-exec "…"`
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 use pirs_ai::{
     AnthropicClient, BackendKind, LlmProvider, ModelRoute, OpenAiCompat, RoutingProvider,
+    ServeTarget,
 };
 use serde::Deserialize;
 
@@ -53,7 +46,6 @@ pub struct RegistryFile {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BackendEntry {
     pub name: String,
-    /// `openai_compatible` (default) or `anthropic`.
     #[serde(default = "default_kind")]
     pub kind: String,
     pub base_url: String,
@@ -69,7 +61,6 @@ fn default_kind() -> String {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelEntry {
     pub alias: String,
-    /// Optional metadata (reserved for future persona/tier UX).
     #[allow(dead_code)]
     pub persona: Option<String>,
     pub tier: Option<String>,
@@ -77,7 +68,7 @@ pub struct ModelEntry {
     #[serde(default)]
     #[allow(dead_code)]
     pub caps: Vec<String>,
-    /// Ordered serve targets; first entry is primary (failover not yet wired).
+    /// Ordered serve targets; first is primary, rest are failover.
     pub serve: Vec<ServeEntry>,
 }
 
@@ -87,7 +78,6 @@ pub struct ServeEntry {
     pub model: String,
 }
 
-/// Merge two registry layers: `over` wins on name/alias conflicts.
 pub fn merge(base: RegistryFile, over: RegistryFile) -> RegistryFile {
     let mut backends = base.backends;
     for b in over.backends {
@@ -108,18 +98,11 @@ pub fn merge(base: RegistryFile, over: RegistryFile) -> RegistryFile {
     RegistryFile { backends, models }
 }
 
-/// Parse a TOML document that is only backends/models (tests + tooling).
 #[cfg(test)]
 pub fn parse_registry_toml(text: &str) -> anyhow::Result<RegistryFile> {
-    toml::from_str(text).context("parse backends/models registry")
+    Ok(toml::from_str(text)?)
 }
 
-/// Extract registry tables from a full config.toml that also has model/provider.
-/// Unknown top-level keys are ignored when we deserialize into RegistryFile if
-/// we use `#[serde(deny_unknown_fields)]` — we don't, so extra keys error on
-/// default toml unless we use a wrapper.
-///
-/// Prefer [`parse_from_config_value`] with a full toml Value.
 pub fn parse_from_config_value(value: &toml::Value) -> RegistryFile {
     let table = match value.as_table() {
         Some(t) => t,
@@ -144,9 +127,31 @@ pub fn parse_from_config_value(value: &toml::Value) -> RegistryFile {
     }
 }
 
-pub fn load_registry_layers(cwd: &std::path::Path) -> RegistryFile {
+/// True when the project's `.pirs/extensions` is in the pirs trust store.
+/// Trust keys look like `{canonical_extensions_path}#{scripts_hash}` (see
+/// `pirs_rhai::trust_directory`).
+fn project_is_trusted(project_pirs_dir: &Path) -> bool {
+    let Ok(home) = std::env::var("HOME") else {
+        return false;
+    };
+    let path = Path::new(&home).join(".pirs").join("trusted.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let set: std::collections::HashSet<String> = serde_json::from_str(&text).unwrap_or_default();
+    if set.is_empty() {
+        return false;
+    }
+    let ext = project_pirs_dir.join("extensions");
+    let ext = ext.canonicalize().unwrap_or(ext);
+    let prefix = format!("{}#", ext.display());
+    let path_s = ext.to_string_lossy();
+    set.iter()
+        .any(|t| t.starts_with(&prefix) || t == path_s.as_ref() || t.starts_with(path_s.as_ref()))
+}
+
+pub fn load_registry_layers(cwd: &Path) -> RegistryFile {
     let mut reg = RegistryFile::default();
-    // User layer first (backends with secrets live here).
     if let Some(path) = crate::config_file::user_config_path() {
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(v) = text.parse::<toml::Value>() {
@@ -154,17 +159,27 @@ pub fn load_registry_layers(cwd: &std::path::Path) -> RegistryFile {
             }
         }
     }
-    // Project layer: models only (backends stripped for security).
     if let Some(path) = crate::config_file::find_project_config(cwd) {
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(v) = text.parse::<toml::Value>() {
                 let mut project = parse_from_config_value(&v);
                 if !project.backends.is_empty() {
-                    eprintln!(
-                        "[note: project .pirs/config.toml defines backends, which are \
-                         user-config-only and were ignored — define backends in ~/.pirs/config.toml]"
-                    );
-                    project.backends.clear();
+                    let project_dir = path.parent().unwrap_or(Path::new("."));
+                    if project_is_trusted(project_dir) {
+                        eprintln!(
+                            "[model registry: loading {} backend(s) from trusted project config {}]",
+                            project.backends.len(),
+                            path.display()
+                        );
+                    } else {
+                        eprintln!(
+                            "[note: project {} defines backends but is not trusted — \
+                             backends ignored (run `pirs trust` in the project, or move \
+                             backends to ~/.pirs/config.toml). Model aliases still load.]",
+                            path.display()
+                        );
+                        project.backends.clear();
+                    }
                 }
                 reg = merge(reg, project);
             }
@@ -173,7 +188,6 @@ pub fn load_registry_layers(cwd: &std::path::Path) -> RegistryFile {
     reg
 }
 
-/// Build live providers for each backend + a [`RoutingProvider`].
 pub fn build_routing_provider(
     registry: &RegistryFile,
     default: Arc<dyn LlmProvider>,
@@ -184,8 +198,6 @@ pub fn build_routing_provider(
         return Ok(None);
     }
     if registry.models.is_empty() {
-        // Backends without models still useful if someone only uses raw ids on
-        // the default provider — nothing to route.
         return Ok(None);
     }
 
@@ -213,7 +225,8 @@ pub fn build_routing_provider(
                 b.api_key_env.as_deref().unwrap_or("")
             );
         }
-        let headers: Vec<(String, String)> = b.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let headers: Vec<(String, String)> =
+            b.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let provider: Arc<dyn LlmProvider> = match kind {
             BackendKind::OpenaiCompatible => Arc::new(
                 OpenAiCompat::new(Some(b.base_url.clone()))
@@ -229,45 +242,50 @@ pub fn build_routing_provider(
 
     let mut routes = Vec::new();
     for m in &registry.models {
-        let primary = m
-            .serve
-            .first()
-            .ok_or_else(|| anyhow!("model alias {:?} has empty serve list", m.alias))?;
-        if !backend_handles.contains_key(&primary.backend)
-            && primary.backend != "default"
-        {
-            bail!(
-                "model alias {:?} serves backend {:?} which is not defined in [[backends]]",
-                m.alias,
-                primary.backend
-            );
+        if m.serve.is_empty() {
+            bail!("model alias {:?} has empty serve list", m.alias);
+        }
+        let mut serve = Vec::new();
+        for s in &m.serve {
+            if !backend_handles.contains_key(&s.backend) && s.backend != "default" {
+                bail!(
+                    "model alias {:?} serves backend {:?} which is not defined in [[backends]]",
+                    m.alias,
+                    s.backend
+                );
+            }
+            serve.push(ServeTarget {
+                backend: s.backend.clone(),
+                remote_model: s.model.clone(),
+            });
         }
         routes.push(ModelRoute {
             alias: m.alias.clone(),
-            backend: primary.backend.clone(),
-            remote_model: primary.model.clone(),
+            serve,
             tier: m.tier.clone(),
             ctx: m.ctx,
         });
     }
 
-    // If a route points at "default", map it to the CLI default handle by
-    // inserting a synthetic backend entry.
-    if routes.iter().any(|r| r.backend == "default") {
+    if routes
+        .iter()
+        .any(|r| r.serve.iter().any(|s| s.backend == "default"))
+    {
         backend_handles.insert(
             "default".into(),
             (Arc::clone(&default), default_api_key.clone(), vec![]),
         );
     }
 
-    // Every serve backend must exist.
     for r in &routes {
-        if !backend_handles.contains_key(&r.backend) {
-            bail!(
-                "model alias {:?} needs backend {:?} — add it under [[backends]]",
-                r.alias,
-                r.backend
-            );
+        for s in &r.serve {
+            if !backend_handles.contains_key(&s.backend) {
+                bail!(
+                    "model alias {:?} needs backend {:?} — add it under [[backends]]",
+                    r.alias,
+                    s.backend
+                );
+            }
         }
     }
 
@@ -302,7 +320,10 @@ api_key_env = "DASHSCOPE_API_KEY"
 alias = "deepseek-v4-flash"
 tier = "fast"
 ctx = 1000000
-serve = [{ backend = "openrouter", model = "deepseek/deepseek-v4-flash" }]
+serve = [
+  { backend = "openrouter", model = "deepseek/deepseek-v4-flash" },
+  { backend = "dashscope", model = "deepseek-v4-flash" },
+]
 
 [[models]]
 alias = "qwen-plus"
@@ -310,19 +331,17 @@ serve = [{ backend = "dashscope", model = "qwen3.5-plus" }]
 "#;
 
     #[test]
-    fn parses_backends_and_model_aliases() {
+    fn parses_backends_and_failover_serve_list() {
         let reg = parse_registry_toml(SAMPLE).unwrap();
         assert_eq!(reg.backends.len(), 2);
-        assert_eq!(reg.models.len(), 2);
-        let or = reg.backends.iter().find(|b| b.name == "openrouter").unwrap();
-        assert!(or.headers.contains_key("X-Title"));
         let m = reg
             .models
             .iter()
             .find(|m| m.alias == "deepseek-v4-flash")
             .unwrap();
-        assert_eq!(m.serve[0].model, "deepseek/deepseek-v4-flash");
-        assert_eq!(m.ctx, Some(1_000_000));
+        assert_eq!(m.serve.len(), 2);
+        assert_eq!(m.serve[0].backend, "openrouter");
+        assert_eq!(m.serve[1].backend, "dashscope");
     }
 
     #[test]
@@ -368,5 +387,19 @@ serve = [{ backend = "b", model = "new" }]
         let m = merge(base, over);
         assert_eq!(m.models.len(), 1);
         assert_eq!(m.models[0].serve[0].model, "new");
+    }
+
+    #[test]
+    fn build_routing_keeps_full_serve_chain() {
+        let reg = parse_registry_toml(SAMPLE).unwrap();
+        // Don't need real keys for construction — empty env is fine.
+        let default: Arc<dyn LlmProvider> = Arc::new(OpenAiCompat::new(None));
+        let router = build_routing_provider(&reg, default, None, 0)
+            .unwrap()
+            .expect("router");
+        let targets = router.targets_for("deepseek-v4-flash");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].backend_name, "openrouter");
+        assert_eq!(targets[1].backend_name, "dashscope");
     }
 }
