@@ -129,12 +129,9 @@ fn crystallizer_writes_skill_after_successful_run() {
     let _guard = ENV_LOCK.lock().unwrap();
     let tmp = std::env::temp_dir().join(format!("pirs-crystal-{}", std::process::id()));
     std::env::set_var("HOME", &tmp);
-    std::fs::create_dir_all(tmp.join(".pirs")).unwrap();
-    std::fs::write(
-        tmp.join(".pirs/audit.jsonl"),
-        "{\"kind\":\"call\",\"tool\":\"edit\",\"args\":{\"path\":\"x.rs\"}}\n",
-    )
-    .unwrap();
+    // No pre-seeded ~/.pirs/audit.jsonl on purpose: this pack keeps its own
+    // transcript now (via on_tool_call/on_tool_result), so it must work
+    // standalone without depending on audit-log.rhai also being loaded.
     let runner: Arc<dyn Fn(String, Option<String>) -> Result<String, String> + Send + Sync> =
         Arc::new(|_, _| {
             Ok("---\nname: rust-editing\ndescription: How to edit Rust files safely\n---\nAlways run cargo check after edits.\n".to_string())
@@ -142,6 +139,7 @@ fn crystallizer_writes_skill_after_successful_run() {
     let host = load("skill-crystallizer.rhai", Some(runner));
     let listener = host.listener().unwrap();
     let hooks = host.hooks();
+    let before = hooks.before_tool_call.unwrap();
     let after = hooks.after_tool_call.unwrap();
     let edit = pirs_ai::ToolResultMessage {
         tool_call_id: "1".into(),
@@ -152,7 +150,9 @@ fn crystallizer_writes_skill_after_successful_run() {
         terminate: false,
         timestamp: 0,
     };
+    before("1", "edit", &serde_json::json!({"path": "x.rs"}));
     after("1", "edit", &edit);
+    before("2", "edit", &serde_json::json!({"path": "y.rs"}));
     after("2", "edit", &edit);
     listener(pirs_agent::AgentEvent::AgentEnd { messages: vec![] });
 

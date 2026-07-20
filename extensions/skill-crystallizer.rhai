@@ -1,5 +1,11 @@
 // skill-crystallizer.rhai — after a successful run, distill what worked into
 // a reusable SKILL.md so future sessions start smarter.
+//
+// Keeps its own compact transcript (tool calls/results, capped at ~6000
+// chars) in this pack's own state rather than reading ~/.pirs/audit.jsonl —
+// that file is only ever written by audit-log.rhai, so a previous version of
+// this pack silently produced nothing for anyone who hadn't ALSO loaded
+// audit-log.rhai. Standalone by construction now: no cross-pack dependency.
 
 const DISTILL_PROMPT = `Distill this completed session into a reusable skill.
 Output ONLY the skill content as markdown with this exact frontmatter:
@@ -16,6 +22,37 @@ fn skills_dir() {
     `${home}/.pirs/skills`
 }
 
+fn truncate(s, n) {
+    if s.len() > n {
+        s.sub_string(0, n)
+    } else {
+        s
+    }
+}
+
+fn append_transcript(line) {
+    let cur = if state_has("transcript") { state_get("transcript") } else { "" };
+    let next = if cur == "" { line } else { cur + "\n" + line };
+    if next.len() > 6000 {
+        next = next.sub_string(next.len() - 6000, 6000);
+    }
+    state_set("transcript", next);
+}
+
+fn on_tool_call(id, name, args) {
+    append_transcript(`CALL ${name}: ${truncate(args.to_json(), 200)}`);
+    ()
+}
+
+fn on_tool_result(id, name, result) {
+    if (name == "edit" || name == "write") && !result.isError {
+        state_set("edit_count", (state_get("edit_count") ?? 0) + 1);
+    }
+    let text = result.text ?? "";
+    append_transcript(`RESULT ${name} isError=${result.isError}: ${truncate(text, 200)}`);
+    ()
+}
+
 fn on_event(ty, data) {
     if ty != "agent_end" {
         return ();
@@ -24,7 +61,7 @@ fn on_event(ty, data) {
         return ();
     }
     state_set("distilled", true);
-    let transcript = exec("tail -c 6000 ~/.pirs/audit.jsonl 2>/dev/null || true", 10).output;
+    let transcript = if state_has("transcript") { state_get("transcript") } else { "" };
     let t = transcript;
     t.trim();
     if t == "" {
@@ -46,13 +83,6 @@ fn on_event(ty, data) {
     exec(`mkdir -p ${dir}`, 5);
     fs_append(`${dir}/SKILL.md`, skill + "\n");
     state_set("crystallized", name);
-}
-
-fn on_tool_result(id, name, result) {
-    if (name == "edit" || name == "write") && !result.isError {
-        state_set("edit_count", (state_get("edit_count") ?? 0) + 1);
-    }
-    ()
 }
 
 fn on_steering() {

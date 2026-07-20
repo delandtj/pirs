@@ -1,6 +1,15 @@
 // dirty-guard.rhai — commit pre-existing user WIP before AI edits a file
 // (aider's dirty-file protection), so AI edits never entangle with user work
 // and undo never eats user changes.
+//
+// Unlike every checkpoint/rollback pack in this catalog (rollback.rhai,
+// stash-checkpoint.rhai, checkpoints.rhai), which deliberately avoid moving
+// HEAD or touching the user's real branch, this one DOES: it's a genuine
+// `git commit` onto whatever branch is checked out, with the message
+// "wip: pre-ai-edit snapshot of <path>". That's the point (a real, durable
+// safety commit the user's own `git log`/`reflog` will show), but it does
+// mean these commits accumulate on the real branch and are yours to squash
+// or leave, unlike the other packs' out-of-band refs.
 
 fn on_tool_call(id, name, args) {
     if name != "edit" && name != "write" {
