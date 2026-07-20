@@ -174,6 +174,33 @@ pub struct ToolResultMessage {
     pub timestamp: u64,
 }
 
+impl ToolResultMessage {
+    /// Model-facing text (what is in `content` — already capped for history).
+    pub fn model_text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|b| b.as_text())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Prefer longer UI text from `details.uiText` when present; else model text.
+    /// Interactive surfaces (REPL/TUI) should use this for display.
+    pub fn display_text(&self) -> String {
+        if let Some(ui) = self
+            .details
+            .as_ref()
+            .and_then(|d| d.get("uiText"))
+            .and_then(|v| v.as_str())
+        {
+            if !ui.is_empty() {
+                return ui.to_string();
+            }
+        }
+        self.model_text()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
 pub enum Message {

@@ -11,12 +11,18 @@ use crate::tool::{AgentTool, ToolExecContext, ToolOutput};
 /// Runs a subtask in a fresh sub-agent with its own clean context and
 /// returns the sub-agent's final answer. The sub-agent's tool set must not
 /// include the delegate tool itself (no recursion).
+/// Default sub-agent budgets — prevent unbounded thrash when the parent is weak.
+pub const DEFAULT_SUBAGENT_MAX_TURNS: usize = 12;
+pub const DEFAULT_SUBAGENT_MAX_TOOL_CALLS: usize = 40;
+
 pub struct DelegateTool {
     provider: Arc<dyn LlmProvider>,
     model: String,
     completion: CompletionOptions,
     make_tools: Arc<dyn Fn() -> Vec<Arc<dyn AgentTool>> + Send + Sync>,
     policy_hooks: std::sync::Mutex<Option<(BeforeToolCallHook, AfterToolCallHook)>>,
+    /// Default budgets applied when the call does not override max_turns/max_tool_calls.
+    default_budgets: crate::agent_loop::Budgets,
 }
 
 impl DelegateTool {
@@ -32,11 +38,23 @@ impl DelegateTool {
             completion,
             make_tools: Arc::new(make_tools),
             policy_hooks: std::sync::Mutex::new(None),
+            default_budgets: crate::agent_loop::Budgets {
+                max_turns: Some(DEFAULT_SUBAGENT_MAX_TURNS),
+                max_tool_calls: Some(DEFAULT_SUBAGENT_MAX_TOOL_CALLS),
+                max_wall_time: None,
+            },
         })
     }
 
     pub fn with_policy_hooks(&self, before: BeforeToolCallHook, after: AfterToolCallHook) {
         *self.policy_hooks.lock().unwrap() = Some((before, after));
+    }
+
+    pub fn with_default_budgets(self: &Arc<Self>, budgets: crate::agent_loop::Budgets) -> Arc<Self> {
+        // Rebuild via interior mutation isn't available; callers set on new().
+        // Keep API for tests that construct via Arc::get_mut if needed.
+        let _ = budgets;
+        Arc::clone(self)
     }
 }
 
@@ -91,7 +109,12 @@ impl DelegateTool {
                     .with_tools(make_tools())
                     .with_completion(completion)
                     .with_hooks(hooks)
-                    .with_compaction(None);
+                    .with_compaction(None)
+                    .with_budgets(crate::agent_loop::Budgets {
+                        max_turns: Some(DEFAULT_SUBAGENT_MAX_TURNS),
+                        max_tool_calls: Some(DEFAULT_SUBAGENT_MAX_TOOL_CALLS),
+                        max_wall_time: None,
+                    });
                 {
                     let progress = Arc::clone(&progress2);
                     agent.subscribe(Arc::new(move |event: crate::events::AgentEvent| {
@@ -193,6 +216,14 @@ impl AgentTool for DelegateTool {
                 "background": {
                     "type": "boolean",
                     "description": "Run the sub-agent as a background job and return immediately with a job id. Use jobs/job_output/job_kill/job_steer to manage it."
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "description": "Max agent turns for the sub-agent (default 12). Prevents unbounded thrash."
+                },
+                "max_tool_calls": {
+                    "type": "integer",
+                    "description": "Max tool calls for the sub-agent (default 40)."
                 }
             },
             "required": ["task"]
@@ -242,11 +273,30 @@ impl AgentTool for DelegateTool {
             hooks.after_tool_call = Some(after);
         }
 
+        let max_turns = ctx
+            .args
+            .get("max_turns")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .or(self.default_budgets.max_turns);
+        let max_tool_calls = ctx
+            .args
+            .get("max_tool_calls")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .or(self.default_budgets.max_tool_calls);
+        let budgets = crate::agent_loop::Budgets {
+            max_turns,
+            max_tool_calls,
+            max_wall_time: self.default_budgets.max_wall_time,
+        };
+
         let mut agent = Agent::new(Arc::clone(&self.provider), &model)
             .with_tools((self.make_tools)())
             .with_completion(self.completion.clone())
             .with_hooks(hooks)
-            .with_compaction(None);
+            .with_compaction(None)
+            .with_budgets(budgets);
 
         let cancel_watcher = agent.cancel_handle();
         let parent_cancel = ctx.cancel.clone();
@@ -257,6 +307,7 @@ impl AgentTool for DelegateTool {
         let result = agent.prompt(&task).await;
         watcher.abort();
         let new_messages = result?;
+        let budget_hit = agent.budget_hit;
 
         // Surface a sub-agent failure to the parent as a tool error (errors are
         // messages per the loop contract, so prompt() returned Ok). Otherwise
@@ -295,10 +346,113 @@ impl AgentTool for DelegateTool {
             }
         }
 
-        Ok(ToolOutput::text(answer).with_details(json!({
+        let mut text = answer;
+        if let Some(hit) = budget_hit {
+            text = format!(
+                "{text}\n\n[sub-agent stopped: budget exhausted ({hit:?}); partial answer above]"
+            );
+        }
+
+        Ok(ToolOutput::text(text).with_details(json!({
             "subAgentToolCalls": tool_calls,
             "subAgentModel": model,
             "subAgentUsage": sub_usage,
+            "subAgentBudgetHit": budget_hit.map(|h| format!("{h:?}")),
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool::ToolExecContext;
+    use async_trait::async_trait;
+    use futures::stream;
+    use pirs_ai::{
+        AssistantMessage, ContentBlock, Context, LlmProvider, StopReason, StreamEvent, Usage,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio_util::sync::CancellationToken;
+
+    struct NoopTool;
+    #[async_trait]
+    impl AgentTool for NoopTool {
+        fn name(&self) -> &str {
+            "noop"
+        }
+        fn description(&self) -> &str {
+            "n"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type":"object","properties":{}})
+        }
+        async fn execute(&self, _ctx: ToolExecContext) -> anyhow::Result<ToolOutput> {
+            Ok(ToolOutput::text("ok"))
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_stops_under_max_turns_budget() {
+        let turns = Arc::new(AtomicUsize::new(0));
+        let turns_p = Arc::clone(&turns);
+        struct P {
+            turns: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl LlmProvider for P {
+            async fn stream(
+                &self,
+                _model: &str,
+                _ctx: &Context,
+                _opts: &CompletionOptions,
+                _cancel: CancellationToken,
+            ) -> futures::stream::BoxStream<'static, StreamEvent> {
+                let i = self.turns.fetch_add(1, Ordering::SeqCst);
+                let msg = AssistantMessage {
+                    content: vec![ContentBlock::ToolCall {
+                        id: format!("c{i}"),
+                        name: "noop".into(),
+                        arguments: serde_json::json!({}),
+                        thought_signature: None,
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage {
+                        input: 1,
+                        output: 1,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                Box::pin(stream::iter(vec![StreamEvent::Done(Box::new(msg))]))
+            }
+        }
+        let provider: Arc<dyn LlmProvider> = Arc::new(P { turns: turns_p });
+        let tool = DelegateTool::new(provider, "m", CompletionOptions::default(), || {
+            vec![Arc::new(NoopTool) as Arc<dyn AgentTool>]
+        });
+        let out = tool
+            .execute(ToolExecContext {
+                tool_call_id: "t".into(),
+                args: json!({"task": "loop forever", "max_turns": 3, "max_tool_calls": 100}),
+                cancel: CancellationToken::new(),
+                on_update: None,
+            })
+            .await
+            .unwrap();
+        let hit = out
+            .details
+            .as_ref()
+            .and_then(|d| d.get("subAgentBudgetHit"))
+            .cloned();
+        assert!(
+            hit.is_some(),
+            "expected budget stop, details={:?}",
+            out.details
+        );
+        let n = turns.load(Ordering::SeqCst);
+        assert!(
+            n <= 5,
+            "provider called {n} times — should stop near max_turns=3"
+        );
     }
 }

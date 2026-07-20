@@ -56,6 +56,45 @@ impl ToolOutput {
         self.terminate = true;
         self
     }
+
+    /// Model-facing plain text (first text block), if any.
+    pub fn model_text(&self) -> Option<&str> {
+        self.content.iter().find_map(|b| b.as_text())
+    }
+
+    /// Longer UI text from details, when dual-output was used.
+    pub fn ui_text(&self) -> Option<&str> {
+        self.details
+            .as_ref()
+            .and_then(|d| d.get("uiText"))
+            .and_then(|v| v.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tool_output_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn text_with_ui_keeps_model_content_and_ui_in_details() {
+        let out = ToolOutput::text_with_ui("short", Some("long full log\nline2".into()));
+        assert_eq!(out.model_text(), Some("short"));
+        assert_eq!(out.ui_text(), Some("long full log\nline2"));
+        // History path uses content only — must not equal the long UI string.
+        assert_ne!(out.model_text().unwrap(), out.ui_text().unwrap());
+        assert_eq!(
+            out.details.as_ref().unwrap().get("uiText").unwrap(),
+            &json!("long full log\nline2")
+        );
+    }
+
+    #[test]
+    fn text_without_ui_has_no_ui_text() {
+        let out = ToolOutput::text("only");
+        assert_eq!(out.model_text(), Some("only"));
+        assert!(out.ui_text().is_none());
+    }
 }
 
 pub struct ToolExecContext {

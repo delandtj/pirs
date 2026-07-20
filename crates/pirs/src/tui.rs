@@ -1865,12 +1865,8 @@ fn apply_agent_event(app: &mut App, event: AgentEvent) {
             });
         }
         AgentEvent::ToolExecutionEnd { result, .. } => {
-            let text: String = result
-                .content
-                .iter()
-                .filter_map(|b| b.as_text())
-                .collect::<Vec<_>>()
-                .join("\n");
+            // Prefer details.uiText (full) over model-capped content for display.
+            let text = result.display_text();
             let preview: String = text.lines().take(8).collect::<Vec<_>>().join("\n");
             if !preview.is_empty() || result.is_error {
                 app.push(ChatItem::ToolEnd {

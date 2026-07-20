@@ -171,8 +171,10 @@ struct Cli {
 
     /// Weak-model hardening preset: enables --tool-diet, --sequential,
     /// --max-retries at least 3, defaults --strategy to plan-exec-weak when
-    /// neither --strategy nor --profile is set, and loads bundled packs
-    /// (weak-model, context-janitor, env-doctor, goal). Skip security packs.
+    /// neither --strategy nor --profile is set, loads bundled packs
+    /// (weak-model, context-janitor, env-doctor, goal), and auto-sets
+    /// --verify from the project test ecosystem when possible. Multi-model:
+    /// use strategy phase `model:` overrides and/or `--cascade <draft_model>`.
     #[arg(long)]
     weak: bool,
 
@@ -259,12 +261,8 @@ impl Printer {
                 println!("\n\x1b[2m> {tool_name} {summary}\x1b[0m");
             }
             AgentEvent::ToolExecutionEnd { result, .. } => {
-                let text: String = result
-                    .content
-                    .iter()
-                    .filter_map(|b| b.as_text())
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                // Prefer details.uiText (full) over model-capped content for display.
+                let text = result.display_text();
                 let preview: String = text.lines().take(6).collect::<Vec<_>>().join("\n");
                 let marker = if result.is_error { "x" } else { "-" };
                 if !preview.is_empty() {
@@ -448,10 +446,32 @@ async fn main() -> anyhow::Result<()> {
                 cli.strategy = Some("plan-exec-weak".into());
             }
         }
+        // Auto-verify for one-shot/strategy mode only (not every REPL turn).
+        // Explicit --verify always wins. Marker-file detect only — no invented
+        // command when no ecosystem is present.
+        if cli.verify.is_none()
+            && !cli.prompt.is_empty()
+            && (cli.strategy.is_some() || cli.profile.is_some())
+        {
+            match pirs_tools::run_tests::detect_verify_command(&cwd) {
+                Some((eco, cmd)) => {
+                    eprintln!("[weak auto-verify: {eco} → `{cmd}`]");
+                    cli.verify = Some(cmd);
+                }
+                None => {
+                    eprintln!(
+                        "[weak auto-verify: skipped — no test ecosystem detected \
+                         (Cargo.toml / go.mod / package.json / pytest markers / Makefile)]"
+                    );
+                }
+            }
+        }
         eprintln!(
-            "[weak mode: tool-diet, sequential, max-retries={}, strategy={:?}, bundled packs]",
+            "[weak mode: tool-diet, sequential, max-retries={}, strategy={:?}, \
+             verify={:?}; multi-model: phase `model:` in strategies and/or --cascade <draft>]",
             cli.max_retries,
-            cli.strategy.as_deref().or(cli.profile.as_deref())
+            cli.strategy.as_deref().or(cli.profile.as_deref()),
+            cli.verify.as_deref()
         );
     }
 
@@ -1329,8 +1349,8 @@ async fn main() -> anyhow::Result<()> {
             .await?;
             eprintln!();
             print_usage(&report);
-            // A --verify gate that never passed exits non-zero so scripts/CI can
-            // tell a green run from a red one.
+            // A --verify gate (including weak auto-verify) that never passed
+            // exits non-zero so scripts/CI can tell a green run from a red one.
             if cli.verify.is_some() && !passed {
                 std::process::exit(1);
             }

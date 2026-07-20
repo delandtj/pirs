@@ -40,7 +40,14 @@ pub fn build_subagent_runner(
                     .with_tools(tools)
                     .with_completion(completion)
                     .with_hooks(hooks)
-                    .with_compaction(None);
+                    .with_compaction(None)
+                    .with_budgets(pirs_agent::agent_loop::Budgets {
+                        max_turns: Some(pirs_agent::delegate::DEFAULT_SUBAGENT_MAX_TURNS),
+                        max_tool_calls: Some(
+                            pirs_agent::delegate::DEFAULT_SUBAGENT_MAX_TOOL_CALLS,
+                        ),
+                        max_wall_time: None,
+                    });
                 let new = agent.prompt(&task).await.map_err(|e| e.to_string())?;
                 *usage_slot.lock().unwrap() += agent.usage_report().grand_total();
                 new.iter()

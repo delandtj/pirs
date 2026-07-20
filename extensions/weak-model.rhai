@@ -1,16 +1,16 @@
 // weak-model.rhai — loop hardening for weaker models.
-// Install: cp to .pirs/extensions/ (project) or ~/.pirs/extensions/ (global),
-// or enable with `pirs --weak` (loads the bundled copy automatically).
+// Install: cp to .pirs/extensions/ or enable with `pirs --weak`.
 //
 // Behaviors:
-// 1) Loop detection — block the same tool call repeated MAX_REPEAT times
-// 2) Path-level edit thrash — after MAX_EDIT_FAILS failures on one path, block + steer
-// 3) No-progress — many tool rounds without a successful mutate or verify → steer
+// 1) Loop detection — path + normalized-args fingerprint (not only exact JSON)
+// 2) Path-level edit thrash — after MAX_EDIT_FAILS failures, block + steer
+// 3) No-progress — many rounds without mutate/verify → steer
 // 4) Verify-after-edit — force build/test after file mutations
-// 5) Stop gate — ending without verify since last edit injects follow-up (fire-capped)
-// 6) Plan pinning — update_plan keeps a visible plan at the context tail
+// 5) Stop gate — ending without verify injects <system-reminder> (fire-capped)
+// 6) Plan pin via update_plan using the same <system-reminder> channel
 
-const PLAN_PIN = "[current-plan pinned by extension]";
+// Note: rhai top-level const is NOT visible inside nested script functions
+// (only the host-called entry). Use string literals inside helpers.
 const MAX_REPEAT = 3;
 const MAX_EDIT_FAILS = 2;
 const MAX_NO_PROGRESS = 6;
@@ -20,8 +20,45 @@ fn is_mutate(name) {
     name == "edit" || name == "edit_block" || name == "write" || name == "safe_edit" || name == "ast_edit"
 }
 
+// Normalize thrash key: tool name + path (if any) + arg JSON with whitespace
+// collapsed. Exact JSON identity is too brittle for weak models that reformat.
+fn thrash_key(name, args) {
+    let path = if args.contains("path") {
+        `${args.path}`
+    } else if args.contains("target_file") {
+        `${args.target_file}`
+    } else if args.contains("file_path") {
+        `${args.file_path}`
+    } else {
+        ""
+    };
+    // Path + tool name is the stable thrash signal; full JSON is secondary.
+    // Include a short args fingerprint so different commands on same path count separately.
+    let raw = args.to_json();
+    let parts = raw.split(" ");
+    let cleaned = str_join(parts, " ");
+    name + "|" + path + "|" + cleaned
+}
+
+fn wrap_reminder(kind, body) {
+    // Literals (not top-level const) so nested fns can see them.
+    "<system-reminder> kind=" + kind + "\n" + body + "\n</system-reminder>"
+}
+
+fn is_reminder_message(m) {
+    if m.role != "user" {
+        return false;
+    }
+    let t = m.content.to_string();
+    t.contains("<system-reminder>")
+}
+
+fn strip_reminders(messages) {
+    messages.filter(|m| !is_reminder_message(m))
+}
+
 fn on_tool_call(id, name, args) {
-    let key = name + "|" + args.to_json();
+    let key = thrash_key(name, args);
     let counts = if state_has("call_counts") { state_get("call_counts") } else { #{} };
     let n = (counts[key] ?? 0) + 1;
     counts[key] = n;
@@ -32,23 +69,25 @@ fn on_tool_call(id, name, args) {
         state_set("nudge_kind", "repeat");
         return #{
             block: true,
-            reason: `This exact call was already made ${n} times and keeps failing or changing nothing. Stop: inspect the last error, change strategy, or ask the user.`
+            reason: `This call fingerprint was already used ${n} times (tool=${name}). Stop: inspect the last error, change strategy, or ask the user.`
         };
     }
 
-    if is_mutate(name) && args.contains("path") {
-        let path = `${args.path}`;
-        state_set("last_mutate_path", path);
-        let fails = if state_has("edit_fails") { state_get("edit_fails") } else { #{} };
-        let f = fails[path] ?? 0;
-        if f >= MAX_EDIT_FAILS {
-            state_set("nudge", true);
-            state_set("nudge_kind", "edit_fail");
-            state_set("edit_fail_path", path);
-            return #{
-                block: true,
-                reason: `edit/write on '${path}' already failed ${f} times. Re-read the full function, use a larger unique oldText, or call safe_edit if available — do not retry the same failing patch.`
-            };
+    if is_mutate(name) {
+        let path = if args.contains("path") { `${args.path}` } else { "" };
+        if path != "" {
+            state_set("last_mutate_path", path);
+            let fails = if state_has("edit_fails") { state_get("edit_fails") } else { #{} };
+            let f = fails[path] ?? 0;
+            if f >= MAX_EDIT_FAILS {
+                state_set("nudge", true);
+                state_set("nudge_kind", "edit_fail");
+                state_set("edit_fail_path", path);
+                return #{
+                    block: true,
+                    reason: `edit/write on '${path}' already failed ${f} times. Re-read the full function, use edit_block with a larger SEARCH block, or safe_edit — do not retry the same failing patch.`
+                };
+            }
         }
     }
 
@@ -90,7 +129,6 @@ fn on_tool_result(id, name, result) {
         }
     }
 
-    // Successful bash after an edit counts as verification / progress.
     if name == "bash" && !err {
         state_set("idle_rounds", 0);
         if state_has("had_successful_mutate") && state_get("had_successful_mutate") {
@@ -109,22 +147,29 @@ fn on_steering() {
         let kind = if state_has("nudge_kind") { state_get("nudge_kind") } else { "repeat" };
         if kind == "edit_fail" {
             let path = if state_has("edit_fail_path") { state_get("edit_fail_path") } else { "the file" };
-            return `Your edits to ${path} keep failing. Re-read the full surrounding function with read, then either (a) use edit_block with a SEARCH/REPLACE of a larger unique block, (b) retry edit with more surrounding context, or (c) call safe_edit with a clear instruction. Do not retry the same oldText.`;
+            return `<system-reminder> kind=edit_fail
+Your edits to ${path} keep failing. Re-read the full function, then use edit_block (SEARCH/REPLACE) with a larger unique block, or safe_edit. Do not retry the same oldText.
+</system-reminder>`;
         }
         if kind == "no_progress" {
             state_set("idle_rounds", 0);
-            return "You have made several tool calls without a successful file change or test run. Stop thrashing: restate the goal in one sentence, list what you know, then take ONE different concrete step (read a specific file or run tests).";
+            return `<system-reminder> kind=no_progress
+You have made several tool calls without a successful file change or test run. Restate the goal in one sentence, then take ONE different concrete step.
+</system-reminder>`;
         }
-        return "You are repeating the same action. Re-read the error output, list what you know, and try a DIFFERENT approach.";
+        return `<system-reminder> kind=repeat
+You are repeating the same action. Re-read the error output and try a DIFFERENT approach.
+</system-reminder>`;
     }
     if state_has("needs_verify") && state_get("needs_verify") {
         state_set("needs_verify", false);
-        return "You just modified files. Before continuing: run the project's build and tests with bash, then fix any failures. Do not claim the task is done until they pass.";
+        return `<system-reminder> kind=verify
+You just modified files. Run the project's build and tests with bash before continuing. Do not claim done until they pass.
+</system-reminder>`;
     }
     ()
 }
 
-// Fire-capped stop gate: force another turn if the model ends after edits without verify.
 fn on_follow_up() {
     let fires = if state_has("stop_fires") { state_get("stop_fires") } else { 0 };
     if fires >= MAX_STOP_FIRES {
@@ -136,7 +181,9 @@ fn on_follow_up() {
             state_set("stop_fires", fires + 1);
             state_set("needs_verify", true);
             return [
-                "STOP GATE: you edited files but have not shown a successful test/build run since. Run the project tests with bash now. Only finish after they pass (or report the real failures)."
+                `<system-reminder> kind=stop_gate
+STOP GATE: you edited files but have not shown a successful test/build run since. Run tests with bash now. Only finish after they pass (or report real failures).
+</system-reminder>`
             ];
         }
     }
@@ -151,20 +198,29 @@ register_tool("update_plan", "Set or update the working plan (markdown checklist
 
 fn tool_update_plan(args) {
     state_set("plan", args.plan);
-    "Plan updated. It will stay pinned at the tail of the context."
+    "Plan updated. It will stay pinned via <system-reminder>."
 }
 
 fn on_context(messages) {
+    // Single pin channel: drop prior <system-reminder> user pins, re-append plan once.
     if !state_has("plan") {
         return messages;
     }
     let plan = state_get("plan");
-    let filtered = messages.filter(|m|
-        !(m.role == "user" && m.content.to_string().starts_with(PLAN_PIN))
-    );
+    let filtered = messages.filter(|m| {
+        if m.role != "user" {
+            return true;
+        }
+        let t = m.content.to_string();
+        !t.contains("<system-reminder>")
+    });
     let pin = #{
         role: "user",
-        content: PLAN_PIN + "\n" + plan + "\n[keep this plan updated with the update_plan tool as you progress]",
+        content: `<system-reminder> kind=plan
+Current plan:
+${plan}
+[update with update_plan as you progress]
+</system-reminder>`,
         timestamp: 0
     };
     let idx = if filtered.len() > 0 { filtered.len() - 1 } else { 0 };

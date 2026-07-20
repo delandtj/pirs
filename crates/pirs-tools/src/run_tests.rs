@@ -112,6 +112,14 @@ fn detect(root: &Path, filter: Option<&str>) -> Result<Runner, String> {
     )
 }
 
+/// Public detect for strategy auto-verify (`--weak` without explicit `--verify`).
+/// Returns `(ecosystem, command)` or `None` when no marker files are present.
+pub fn detect_verify_command(root: &Path) -> Option<(String, String)> {
+    detect(root, None)
+        .ok()
+        .map(|r| (r.ecosystem.to_string(), r.command))
+}
+
 /// Minimal POSIX single-quote escaping so a user filter can't break out of the
 /// command. Wraps in single quotes and escapes embedded single quotes.
 fn shell_quote(s: &str) -> String {
@@ -318,6 +326,16 @@ mod tests {
         let err = detect(dir.path(), None).unwrap_err();
         assert!(err.contains("Cargo.toml"), "{err}");
         assert!(err.contains("go.mod"), "{err}");
+    }
+
+    #[test]
+    fn detect_verify_command_public_api_for_weak_auto_verify() {
+        let dir = tempdir().unwrap();
+        assert!(detect_verify_command(dir.path()).is_none());
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+        let (eco, cmd) = detect_verify_command(dir.path()).expect("rust");
+        assert_eq!(eco, "rust");
+        assert_eq!(cmd, "cargo test");
     }
 
     #[test]

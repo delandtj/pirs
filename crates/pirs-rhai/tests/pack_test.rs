@@ -126,7 +126,7 @@ async fn loop_detector_blocks_third_identical_call() {
 
     let blocked = new.iter().any(|m| matches!(
         m,
-        Message::ToolResult(r) if r.is_error && r.content[0].as_text().unwrap().contains("already made 3 times")
+        Message::ToolResult(r) if r.is_error && r.content[0].as_text().unwrap().contains("fingerprint was already used")
     ));
     assert!(blocked, "third identical call should be blocked: {new:?}");
 }
@@ -146,7 +146,7 @@ async fn verify_after_edit_steers_model_to_test() {
     let second = &calls[1];
     assert!(second.iter().any(|m| matches!(
         m,
-        Message::User(u) if matches!(&u.content, pirs_ai::UserContent::Text(t) if t.contains("run the project's build and tests"))
+        Message::User(u) if matches!(&u.content, pirs_ai::UserContent::Text(t) if t.contains("build and tests") || t.contains("kind=verify") || t.contains("<system-reminder>"))
     )));
 }
 
@@ -177,7 +177,7 @@ async fn stop_gate_forces_verify_after_edit_before_finish() {
         round.iter().any(|m| {
             matches!(
                 m,
-                Message::User(u) if matches!(&u.content, pirs_ai::UserContent::Text(t) if t.contains("STOP GATE"))
+                Message::User(u) if matches!(&u.content, pirs_ai::UserContent::Text(t) if t.contains("STOP GATE") || t.contains("stop_gate") || t.contains("<system-reminder>"))
             )
         })
     });
@@ -218,7 +218,9 @@ async fn edit_thrash_blocks_after_repeated_failures() {
             m,
             Message::ToolResult(r) if r.is_error
                 && r.content.iter().any(|b| b.as_text().is_some_and(|t|
-                    t.contains("already failed") || t.contains("already made 3 times")
+                    t.contains("already failed")
+                        || t.contains("fingerprint was already used")
+                        || t.contains("already made")
                 ))
         )
     });
@@ -243,7 +245,7 @@ async fn plan_pinned_at_tail_of_context() {
     let last_call = calls.last().unwrap();
     let pin_pos = last_call.iter().position(|m| matches!(
         m,
-        Message::User(u) if matches!(&u.content, pirs_ai::UserContent::Text(t) if t.contains("[current-plan pinned by extension]") && t.contains("1. do x"))
+        Message::User(u) if matches!(&u.content, pirs_ai::UserContent::Text(t) if t.contains("<system-reminder>") && t.contains("1. do x"))
     ));
     assert!(
         pin_pos.is_some(),
@@ -257,7 +259,7 @@ async fn plan_pinned_at_tail_of_context() {
 
     let duplicates = last_call.iter().filter(|m| matches!(
         m,
-        Message::User(u) if matches!(&u.content, pirs_ai::UserContent::Text(t) if t.contains("[current-plan pinned by extension]"))
+        Message::User(u) if matches!(&u.content, pirs_ai::UserContent::Text(t) if t.contains("<system-reminder>") && t.contains("kind=plan"))
     )).count();
     assert_eq!(duplicates, 1, "old pins must be replaced, not accumulated");
 }

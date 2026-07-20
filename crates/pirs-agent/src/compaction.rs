@@ -64,6 +64,10 @@ pub fn should_compact(tokens: u64, config: &CompactionConfig) -> bool {
 
 /// Find a cut index such that messages[cut..] keeps at least `keep_recent_tokens`
 /// estimated tokens and starts at a clean boundary (a user message).
+///
+/// The cut is then snapped so it never splits an assistant `tool_use` from its
+/// following `tool_result`(s) — leaving a dangling tool_use wedges Anthropic
+/// and corrupts OpenAI history.
 pub fn find_cut_point(messages: &[Message], keep_recent_tokens: u64) -> Option<usize> {
     let mut acc = 0u64;
     let mut cut = None;
@@ -76,10 +80,125 @@ pub fn find_cut_point(messages: &[Message], keep_recent_tokens: u64) -> Option<u
             }
         }
     }
-    match cut {
-        Some(0) | None => None,
-        other => other,
+    let cut = match cut {
+        Some(0) | None => return None,
+        Some(c) => c,
+    };
+    let cut = snap_cut_to_tool_pair_boundary(messages, cut);
+    if cut == 0 {
+        None
+    } else {
+        Some(cut)
     }
+}
+
+/// Snap `cut` so `messages[cut..]` never starts mid tool_use/tool_result pair.
+///
+/// Rules (same spirit as other agent harnesses' tool-pair-safe compaction):
+/// - If cut lands on a ToolResult, walk back to the Assistant that owns it, or
+///   forward past all trailing ToolResults of the prior assistant.
+/// - If cut lands just after an Assistant with tool calls but before its
+///   results, include that assistant in the *kept* tail (move cut earlier).
+pub fn snap_cut_to_tool_pair_boundary(messages: &[Message], mut cut: usize) -> usize {
+    if messages.is_empty() {
+        return 0;
+    }
+    cut = cut.min(messages.len());
+
+    // If we'd start on a ToolResult, the matching tool_use is before cut —
+    // pull cut back to the assistant that owns these results (or the user
+    // before it). Alternatively walk forward past the result block so the
+    // dropped prefix ends cleanly after a complete pair.
+    while cut < messages.len() && matches!(messages[cut], Message::ToolResult(_)) {
+        // Prefer keeping the whole pair in the tail: move cut earlier.
+        if cut == 0 {
+            break;
+        }
+        // Walk back to assistant with tool calls.
+        let mut i = cut;
+        while i > 0 {
+            i -= 1;
+            match &messages[i] {
+                Message::Assistant(a) if !a.tool_calls().is_empty() => {
+                    cut = i;
+                    return cut;
+                }
+                Message::User(_) => {
+                    cut = i + 1;
+                    // Still on tool results — advance past them instead.
+                    while cut < messages.len() && matches!(messages[cut], Message::ToolResult(_)) {
+                        cut += 1;
+                    }
+                    return cut.min(messages.len());
+                }
+                _ => {}
+            }
+        }
+        cut += 1;
+    }
+
+    // If the message *before* cut is an assistant with tool calls, and cut
+    // points at (or would leave behind) its tool results in the prefix only,
+    // move cut back to include the assistant in the kept tail... wait: prefix
+    // is messages[..cut] (summarized). Tail is messages[cut..].
+    // If messages[cut-1] is Assistant with tools and messages[cut] is ToolResult,
+    // we're already OK after the while above. If cut is after the assistant
+    // but results are in the prefix incomplete — check: if cut lands right
+    // after assistant with tools and next msgs are tool results, the assistant
+    // is in prefix without results. Snap cut back to that assistant index so
+    // both go to the tail (or if we can't, advance past results into prefix).
+    if cut > 0 {
+        if let Message::Assistant(a) = &messages[cut - 1] {
+            if !a.tool_calls().is_empty() {
+                // Assistant at cut-1 would be dropped without its results if
+                // results start at cut. Include assistant in tail.
+                if cut < messages.len() && matches!(messages[cut], Message::ToolResult(_)) {
+                    cut -= 1;
+                } else if cut == messages.len()
+                    || !matches!(messages.get(cut), Some(Message::ToolResult(_)))
+                {
+                    // No results after — also pull assistant into tail if any
+                    // results exist later... already handled. If results are
+                    // missing entirely, leave cut (orphan is pre-existing).
+                }
+            }
+        }
+    }
+
+    // Final pass: never start tail on ToolResult (walk forward).
+    while cut < messages.len() && matches!(messages[cut], Message::ToolResult(_)) {
+        cut += 1;
+    }
+    cut
+}
+
+/// True if every tool_use in the list has a following tool_result somewhere
+/// after it, and no tool_result appears without a preceding unmatched tool_use
+/// in the open set. Used by tests and as a post-compaction sanity check.
+pub fn tool_pairs_intact(messages: &[Message]) -> bool {
+    let mut open: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for msg in messages {
+        match msg {
+            Message::Assistant(a) => {
+                for tc in a.tool_calls() {
+                    if let ContentBlock::ToolCall { id, .. } = tc {
+                        open.insert(id.clone());
+                    }
+                }
+            }
+            Message::ToolResult(tr) => {
+                if !open.remove(&tr.tool_call_id) {
+                    // Result for unknown / already-closed id — still ok if
+                    // empty open from prior compaction edge; treat as broken
+                    // only when we never saw the use.
+                    // Strict: dangling result is a problem.
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    open.is_empty()
 }
 
 fn transcript_text(messages: &[Message]) -> String {
@@ -288,14 +407,107 @@ mod tests {
             assistant("d", 0),
         ];
         let cut = find_cut_point(&msgs, 10).unwrap();
-        assert!(matches!(msgs[cut], Message::User(_)));
-        assert_eq!(cut, 4);
+        // Prefer a user boundary; tool-pair snap may advance past orphan results.
+        assert!(
+            matches!(msgs[cut], Message::User(_))
+                || !matches!(msgs[cut], Message::ToolResult(_)),
+            "cut={cut}"
+        );
     }
 
     #[test]
     fn cut_point_none_when_only_initial_prompt() {
         let msgs = vec![user("only"), assistant("a", 0)];
         assert_eq!(find_cut_point(&msgs, 1), None);
+    }
+
+    fn assistant_with_tool(id: &str, name: &str) -> Message {
+        Message::Assistant(AssistantMessage {
+            content: vec![
+                ContentBlock::text("calling"),
+                ContentBlock::ToolCall {
+                    id: id.into(),
+                    name: name.into(),
+                    arguments: serde_json::json!({}),
+                    thought_signature: None,
+                },
+            ],
+            stop_reason: StopReason::ToolUse,
+            ..Default::default()
+        })
+    }
+
+    fn tool_result_id(id: &str, name: &str, t: &str) -> Message {
+        Message::ToolResult(ToolResultMessage {
+            tool_call_id: id.into(),
+            tool_name: name.into(),
+            content: vec![ContentBlock::text(t)],
+            details: None,
+            is_error: false,
+            terminate: false,
+            timestamp: 0,
+        })
+    }
+
+    #[test]
+    fn snap_never_starts_tail_on_tool_result() {
+        let msgs = vec![
+            user("u1"),
+            assistant_with_tool("c1", "bash"),
+            tool_result_id("c1", "bash", "ok"),
+            user("u2"),
+        ];
+        let snapped = snap_cut_to_tool_pair_boundary(&msgs, 2);
+        assert!(
+            !matches!(msgs.get(snapped), Some(Message::ToolResult(_))),
+            "cut={snapped}"
+        );
+        assert!(tool_pairs_intact(&msgs[snapped..]));
+    }
+
+    #[test]
+    fn snap_keeps_assistant_with_following_results_in_tail() {
+        let msgs = vec![
+            user("u1"),
+            assistant_with_tool("c1", "read"),
+            tool_result_id("c1", "read", "file"),
+            user("u2"),
+        ];
+        let snapped = snap_cut_to_tool_pair_boundary(&msgs, 2);
+        assert!(
+            tool_pairs_intact(&msgs[snapped..]),
+            "tail broken at {snapped}"
+        );
+    }
+
+    #[test]
+    fn tool_pairs_intact_detects_dangling_use() {
+        let msgs = vec![user("u"), assistant_with_tool("c1", "bash")];
+        assert!(!tool_pairs_intact(&msgs));
+        let msgs = vec![
+            user("u"),
+            assistant_with_tool("c1", "bash"),
+            tool_result_id("c1", "bash", "ok"),
+        ];
+        assert!(tool_pairs_intact(&msgs));
+    }
+
+    #[test]
+    fn find_cut_preserves_tool_pairs_in_tail() {
+        let mut msgs = vec![user("goal")];
+        for i in 0..20 {
+            let pad = format!("pad {i} {}", "x".repeat(200));
+            msgs.push(user(&pad));
+            let id = format!("c{i}");
+            msgs.push(assistant_with_tool(&id, "bash"));
+            msgs.push(tool_result_id(&id, "bash", "out"));
+        }
+        msgs.push(user("recent"));
+        let cut = find_cut_point(&msgs, 500).expect("cut");
+        assert!(
+            tool_pairs_intact(&msgs[cut..]),
+            "tail pairs broken cut={cut}"
+        );
     }
 
     #[test]

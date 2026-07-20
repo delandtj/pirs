@@ -668,19 +668,24 @@ fn finalize_result(
     hooks: &Hooks,
 ) -> ToolResultMessage {
     let mut result = match outcome {
-        Ok(out) => ToolResultMessage {
-            tool_call_id: id.to_string(),
-            tool_name: name.to_string(),
-            content: if out.content.is_empty() {
-                vec![]
-            } else {
-                out.content
-            },
-            details: out.details,
-            is_error: false,
-            terminate: out.terminate,
-            timestamp: pirs_ai::now_millis(),
-        },
+        Ok(out) => {
+            // History for the next LLM turn always uses model-facing content
+            // (already capped by tools that call text_with_ui). Longer UI text
+            // lives only in details.uiText for TUI/REPL rendering.
+            ToolResultMessage {
+                tool_call_id: id.to_string(),
+                tool_name: name.to_string(),
+                content: if out.content.is_empty() {
+                    vec![]
+                } else {
+                    out.content
+                },
+                details: out.details,
+                is_error: false,
+                terminate: out.terminate,
+                timestamp: pirs_ai::now_millis(),
+            }
+        }
         Err(e) => error_result(id, name, &e.to_string()),
     };
     if let Some(after) = &hooks.after_tool_call {
