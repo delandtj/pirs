@@ -528,14 +528,138 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn setup_terminal() -> anyhow::Result<Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>>
-{
+/// Puts the real terminal into raw/alt-screen/mouse-capture mode, but the
+/// returned `Terminal` renders into an in-memory buffer, not real stdout —
+/// see `TuiWriter` for why. Terminal-size and cursor-position queries still
+/// hit the real tty regardless of what the backend's writer is: crossterm's
+/// `size()`/`cursor::position()` are separate ioctls, not routed through the
+/// `Write` the backend wraps.
+fn setup_terminal() -> anyhow::Result<Terminal<ratatui::backend::CrosstermBackend<Vec<u8>>>> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     stdout.execute(crossterm::terminal::EnterAlternateScreen)?;
     stdout.execute(EnableMouseCapture)?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
+    let backend = ratatui::backend::CrosstermBackend::new(Vec::new());
     Ok(Terminal::new(backend)?)
+}
+
+/// A single-slot mailbox that always holds only the most recently pushed
+/// value: `push` replaces — never queues behind — anything not yet taken.
+/// This is the backpressure gate itself, factored out from `TuiWriter` so
+/// its coalescing behavior is unit-testable without a real terminal or
+/// background thread.
+struct LatestSlot<T> {
+    state: Mutex<LatestSlotState<T>>,
+    cvar: std::sync::Condvar,
+}
+
+struct LatestSlotState<T> {
+    value: Option<T>,
+    closed: bool,
+}
+
+impl<T> LatestSlot<T> {
+    fn new() -> Self {
+        LatestSlot {
+            state: Mutex::new(LatestSlotState {
+                value: None,
+                closed: false,
+            }),
+            cvar: std::sync::Condvar::new(),
+        }
+    }
+
+    fn push(&self, value: T) {
+        let mut guard = self.state.lock().unwrap();
+        guard.value = Some(value);
+        self.cvar.notify_one();
+    }
+
+    /// Blocks until a value is available, returning it immediately if one is
+    /// already pending. Returns `None` once `close` has been called and
+    /// nothing is left to take — the signal for the consumer to stop.
+    fn take_blocking(&self) -> Option<T> {
+        let mut guard = self.state.lock().unwrap();
+        while guard.value.is_none() && !guard.closed {
+            guard = self.cvar.wait(guard).unwrap();
+        }
+        guard.value.take()
+    }
+
+    fn close(&self) {
+        let mut guard = self.state.lock().unwrap();
+        guard.closed = true;
+        self.cvar.notify_one();
+    }
+}
+
+/// Decouples the actual terminal write (a blocking OS syscall that can stall
+/// under a slow pty/tmux/SSH pipe) from the async event loop that computes
+/// frames. The loop renders each frame into an in-memory
+/// `CrosstermBackend<Vec<u8>>` (cheap, CPU-only) and hands the resulting
+/// bytes to this writer, which owns real stdout on a dedicated OS thread.
+/// Only the LATEST pending frame is kept (via `LatestSlot`): if the writer
+/// thread is still flushing a previous frame when a new one is computed,
+/// the stale one is replaced rather than queued, so heavy token streaming
+/// (many redraws in quick succession) never backs up waiting on terminal
+/// I/O — the screen just catches up to the latest state once the writer is
+/// free, which is all a human watching the screen can perceive anyway.
+struct TuiWriter {
+    slot: Arc<LatestSlot<Vec<u8>>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TuiWriter {
+    fn spawn() -> Self {
+        let slot = Arc::new(LatestSlot::<Vec<u8>>::new());
+        let worker_slot = Arc::clone(&slot);
+        let handle = std::thread::spawn(move || {
+            let mut stdout = std::io::stdout();
+            while let Some(bytes) = worker_slot.take_blocking() {
+                let _ = std::io::Write::write_all(&mut stdout, &bytes);
+                let _ = std::io::Write::flush(&mut stdout);
+            }
+        });
+        TuiWriter {
+            slot,
+            handle: Some(handle),
+        }
+    }
+
+    /// Hands off a rendered frame's bytes to the writer thread, replacing —
+    /// not queuing behind — any not-yet-written previous frame. Never
+    /// blocks: this is the backpressure gate, expressed as "keep only the
+    /// newest thing", not as flow control on the sender.
+    fn push(&self, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            self.slot.push(bytes);
+        }
+    }
+
+    /// Signals shutdown and blocks until the writer thread has flushed
+    /// whatever frame it was last given, so the final on-screen state (and
+    /// any terminal-restore escape sequences written afterward) aren't
+    /// racing an in-flight write on another thread. `Drop` calls this same
+    /// logic (harmlessly, a second time) as a safety net for any early
+    /// return between construction and the explicit call — otherwise an
+    /// error propagating out of the loop would leak the writer thread,
+    /// parked forever waiting on a signal nobody sends.
+    fn shutdown(mut self) {
+        self.close_and_join();
+    }
+
+    fn close_and_join(&mut self) {
+        self.slot.close();
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for TuiWriter {
+    fn drop(&mut self) {
+        self.close_and_join();
+    }
 }
 
 fn restore_terminal() -> anyhow::Result<()> {
@@ -580,6 +704,7 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
 
     let mut terminal = setup_terminal()?;
     let _guard = TerminalGuard;
+    let tui_writer = TuiWriter::spawn();
 
     let model = opts.agent.model.clone();
     let approval_name = opts.approval_mode.name().to_string();
@@ -719,7 +844,14 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
         }
 
         draw_dedup_cursor(&mut terminal, &mut app, &mut last_cursor)?;
+        let frame_bytes = std::mem::take(terminal.backend_mut().writer_mut());
+        tui_writer.push(frame_bytes);
     }
+
+    // Make sure the writer thread has flushed the last frame it was given
+    // before the restore escape sequences below write to the same real
+    // stdout — otherwise they could race and interleave.
+    tui_writer.shutdown();
 
     // Explicit restore before Drop (Drop is best-effort).
     restore_terminal()?;
@@ -2002,5 +2134,76 @@ mod tests {
         assert_eq!(tool_icon("bash"), "▸");
         assert_eq!(tool_icon("read"), "◉");
         assert_eq!(tool_icon("mystery"), "○");
+    }
+
+    #[test]
+    fn latest_slot_overwrites_unconsumed_value_rather_than_queuing() {
+        // The core backpressure behavior: pushing B then C before anyone
+        // takes A's successor must leave only C, not queue B behind A.
+        let slot: LatestSlot<u32> = LatestSlot::new();
+        slot.push(1);
+        assert_eq!(slot.take_blocking(), Some(1));
+        slot.push(2);
+        slot.push(3);
+        assert_eq!(
+            slot.take_blocking(),
+            Some(3),
+            "second push should replace, not queue behind, the first"
+        );
+    }
+
+    #[test]
+    fn latest_slot_wakes_a_blocked_consumer() {
+        // A consumer waiting on an empty slot must be woken by a later push,
+        // not just see a value that was already there when it started.
+        let slot = Arc::new(LatestSlot::<u32>::new());
+        let consumer_slot = Arc::clone(&slot);
+        let handle = std::thread::spawn(move || consumer_slot.take_blocking());
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        slot.push(42);
+
+        assert_eq!(handle.join().unwrap(), Some(42));
+    }
+
+    #[test]
+    fn latest_slot_close_releases_a_blocked_consumer_with_none() {
+        let slot = Arc::new(LatestSlot::<u32>::new());
+        let consumer_slot = Arc::clone(&slot);
+        let handle = std::thread::spawn(move || consumer_slot.take_blocking());
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        slot.close();
+
+        assert_eq!(handle.join().unwrap(), None);
+    }
+
+    #[test]
+    fn latest_slot_close_still_yields_a_value_pushed_before_it() {
+        let slot: LatestSlot<u32> = LatestSlot::new();
+        slot.push(7);
+        slot.close();
+        assert_eq!(
+            slot.take_blocking(),
+            Some(7),
+            "a value pushed before close must still be delivered"
+        );
+        assert_eq!(
+            slot.take_blocking(),
+            None,
+            "nothing left after that -> consumer should stop"
+        );
+    }
+
+    #[test]
+    fn tui_writer_push_and_shutdown_do_not_hang() {
+        // Doesn't assert on stdout content (nothing to intercept without
+        // redesigning TuiWriter around a generic writer), but proves the
+        // full spawn -> push -> shutdown lifecycle actually terminates
+        // rather than leaving the background thread parked forever.
+        let writer = TuiWriter::spawn();
+        writer.push(b"hello".to_vec());
+        writer.push(b"world".to_vec());
+        writer.shutdown();
     }
 }
