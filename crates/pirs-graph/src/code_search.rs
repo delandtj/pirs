@@ -23,6 +23,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::budget::{join_within_budget, DEFAULT_TOKEN_BUDGET};
 use crate::lexical::LexicalIndex;
 use crate::store::{EmbedItem, GraphStore};
 
@@ -255,25 +256,32 @@ impl AgentTool for CodeSearchTool {
         } else {
             "lexical+graph"
         };
-        let mut out = format!("Top {} for \"{}\" [{}]:\n", ranked.len(), args.query, arms);
-        for (i, (k, _)) in ranked.iter().enumerate() {
-            if let Some(c) = by_key.get(k) {
+        let lines: Vec<String> = ranked
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (k, _))| {
+                let c = by_key.get(k)?;
                 let rel = c
                     .file
                     .strip_prefix(&self.root)
                     .unwrap_or(&c.file)
                     .to_string_lossy();
                 let callers = graph.callers(&c.name).len();
-                out.push_str(&format!(
-                    "{}. {} ({}:{})  [{} callers]\n",
+                Some(format!(
+                    "{}. {} ({}:{})  [{} callers]",
                     i + 1,
                     c.name,
                     rel,
                     c.line,
                     callers
-                ));
-            }
-        }
+                ))
+            })
+            .collect();
+        let header = format!("Top {} for \"{}\" [{}]:", ranked.len(), args.query, arms);
+        let out = format!(
+            "{header}\n{}",
+            join_within_budget(&lines, DEFAULT_TOKEN_BUDGET)
+        );
         Ok(ToolOutput::text(out))
     }
 }

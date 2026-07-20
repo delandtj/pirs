@@ -1,5 +1,6 @@
 pub mod ast_edit;
 pub mod bg_index;
+pub mod budget;
 pub mod code_map;
 pub mod code_search;
 pub mod embed_util;

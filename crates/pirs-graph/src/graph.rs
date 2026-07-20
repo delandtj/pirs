@@ -234,13 +234,21 @@ impl Graph {
         out
     }
 
-    pub fn top(&self, n: usize) -> Vec<(&Symbol, f64)> {
+    /// All symbols ranked best-first by pagerank score, uncapped — the raw
+    /// candidate list a caller bisects over to pack within a token budget
+    /// (see `budget::join_within_budget`) rather than a fixed count.
+    pub fn ranked_symbols(&self) -> Vec<(&Symbol, f64)> {
         let mut scored: Vec<(&Symbol, f64)> = self
             .symbols
             .iter()
             .map(|s| (s, *self.pagerank.get(&s.name).unwrap_or(&0.0)))
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored
+    }
+
+    pub fn top(&self, n: usize) -> Vec<(&Symbol, f64)> {
+        let mut scored = self.ranked_symbols();
         scored.truncate(n);
         scored
     }

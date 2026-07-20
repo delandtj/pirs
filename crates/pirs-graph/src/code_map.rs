@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::budget::{join_within_budget, DEFAULT_TOKEN_BUDGET};
 use crate::graph::Symbol;
 
 #[derive(Deserialize, JsonSchema)]
@@ -68,10 +69,9 @@ impl AgentTool for CodeMapTool {
                 if defs.is_empty() {
                     format!("no definition found for '{target}'")
                 } else {
-                    defs.iter()
-                        .map(|s| fmt_symbol(s, &self.root))
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                    let lines: Vec<String> =
+                        defs.iter().map(|s| fmt_symbol(s, &self.root)).collect();
+                    join_within_budget(&lines, DEFAULT_TOKEN_BUDGET)
                 }
             }
             "callers" => {
@@ -79,11 +79,9 @@ impl AgentTool for CodeMapTool {
                 if callers.is_empty() {
                     format!("no callers of '{target}' in the graph")
                 } else {
-                    callers
-                        .iter()
-                        .map(|s| fmt_symbol(s, &self.root))
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                    let lines: Vec<String> =
+                        callers.iter().map(|s| fmt_symbol(s, &self.root)).collect();
+                    join_within_budget(&lines, DEFAULT_TOKEN_BUDGET)
                 }
             }
             "callees" => {
@@ -95,13 +93,19 @@ impl AgentTool for CodeMapTool {
                 }
             }
             "top" => {
+                // ranked_symbols() is the uncapped, best-first candidate
+                // list; requested `limit` bounds the item count as before
+                // (preserving existing `limit: 1`-style callers), and the
+                // budget bisection on top of that is a safety net for when
+                // even `limit` items' rendered text is unexpectedly large.
                 let n = args.limit.unwrap_or(15);
-                graph
-                    .top(n)
-                    .iter()
+                let lines: Vec<String> = graph
+                    .ranked_symbols()
+                    .into_iter()
+                    .take(n)
                     .map(|(s, rank)| format!("{rank:.4} {}", fmt_symbol(s, &self.root)))
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                    .collect();
+                join_within_budget(&lines, DEFAULT_TOKEN_BUDGET)
             }
             "file_map" => {
                 let path = self.root.join(&target);
@@ -109,24 +113,21 @@ impl AgentTool for CodeMapTool {
                 if syms.is_empty() {
                     format!("no symbols in {target}")
                 } else {
-                    syms.iter()
-                        .map(|s| fmt_symbol(s, &self.root))
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                    let lines: Vec<String> =
+                        syms.iter().map(|s| fmt_symbol(s, &self.root)).collect();
+                    join_within_budget(&lines, DEFAULT_TOKEN_BUDGET)
                 }
             }
             "blast" => {
                 let callers = graph.callers(&target);
                 let callees = graph.callees(&target);
+                let lines: Vec<String> =
+                    callers.iter().map(|s| fmt_symbol(s, &self.root)).collect();
                 format!(
                     "'{target}' blast radius: {} direct caller(s), {} direct callee(s)\ncallers:\n{}",
                     callers.len(),
                     callees.len(),
-                    callers
-                        .iter()
-                        .map(|s| fmt_symbol(s, &self.root))
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                    join_within_budget(&lines, DEFAULT_TOKEN_BUDGET)
                 )
             }
             other => {
@@ -185,5 +186,47 @@ mod tests {
 
         let fmap = run(serde_json::json!({"action": "file_map", "target": "a.rs"})).await;
         assert!(fmap.contains("fn a"), "{fmap}");
+    }
+
+    #[tokio::test]
+    async fn callers_with_many_matches_is_capped_by_token_budget_not_returned_unbounded() {
+        // "callers" had no cap of any kind before the token-budget packer —
+        // a symbol called from hundreds of places would dump all of them
+        // into the tool result. This proves the budget cap actually engages
+        // on a real call, not just in the isolated budget:: unit tests.
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = String::from("fn shared() {}\n");
+        for i in 0..300 {
+            src.push_str(&format!(
+                "fn caller_number_{i:04}_with_a_reasonably_long_name() {{ shared(); }}\n"
+            ));
+        }
+        std::fs::write(dir.path().join("a.rs"), src).unwrap();
+        let graph = Arc::new(crate::LazyGraph::new(dir.path().to_path_buf()));
+        let tool = CodeMapTool::new(graph, dir.path().to_path_buf());
+
+        let out = tool
+            .execute(ToolExecContext {
+                tool_call_id: "t".into(),
+                args: serde_json::json!({"action": "callers", "target": "shared"}),
+                cancel: CancellationToken::new(),
+                on_update: None,
+            })
+            .await
+            .unwrap()
+            .content[0]
+            .as_text()
+            .unwrap()
+            .to_string();
+
+        assert!(out.contains("caller_number_0000"), "{out}");
+        assert!(
+            out.contains("more result(s) omitted to stay within the token budget"),
+            "300 callers should overflow the default budget and note the drop: {out}"
+        );
+        assert!(
+            !out.contains("caller_number_0299"),
+            "the tail should have been dropped for budget, not silently kept: {out}"
+        );
     }
 }
