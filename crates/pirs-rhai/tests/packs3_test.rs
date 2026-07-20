@@ -2,6 +2,11 @@ use std::sync::Arc;
 
 use pirs_rhai::ExtensionHost;
 
+// Guards tests that call `std::env::set_current_dir` — the process cwd is
+// global, so two such tests racing in different threads (the default for
+// `cargo test`) can each restore the other's tempdir out from under it.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn load(name: &str, with_runner: bool) -> Arc<ExtensionHost> {
     let path = format!("{}/../../extensions/{name}", env!("CARGO_MANIFEST_DIR"));
     let mut host = ExtensionHost::new();
@@ -467,6 +472,7 @@ fn sandbox_runs_a_command_or_fails_loud_with_a_named_reason() {
     // pack's logic — this test accepts either a real result (an environment
     // where bwrap actually works) or the pack's own named diagnostic for
     // that specific failure, but never a silent/garbage failure.
+    let _g = ENV_LOCK.lock().unwrap();
     let host = load("sandbox.rhai", false);
     let dir = tempfile::tempdir().unwrap();
     let prev = std::env::current_dir().unwrap();
@@ -489,5 +495,65 @@ fn sandbox_runs_a_command_or_fails_loud_with_a_named_reason() {
         "expected either a real sandboxed result or the named bwrap-setup-failure diagnostic, got: {text}"
     );
     // Whichever path was taken, the scratch dir it used must be cleaned up.
+    assert!(!dir.path().join(".pirs").join("sandbox-tmp").exists());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn sandbox_falls_back_to_docker_when_bwrap_cannot_start() {
+    // This environment's `kernel.apparmor_restrict_unprivileged_userns=1`
+    // reliably breaks bwrap (confirmed above), so if docker is on PATH this
+    // test proves the fallback actually engages and produces a real result,
+    // not just that the pack's failure message is well-formed. Skips (not
+    // fails) if docker isn't available, since that's an environment fact
+    // this pack's own logic already handles by degrading further.
+    if std::process::Command::new("sh")
+        .args(["-c", "command -v docker"])
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(true)
+    {
+        eprintln!("skipping: docker not on PATH in this environment");
+        return;
+    }
+    if std::process::Command::new("sh")
+        .args([
+            "-c",
+            "bwrap --die-with-parent --unshare-net --ro-bind / / -- true",
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        eprintln!("skipping: bwrap actually works in this environment, nothing to fall back from");
+        return;
+    }
+
+    let _g = ENV_LOCK.lock().unwrap();
+    let host = load("sandbox.rhai", false);
+    let dir = tempfile::tempdir().unwrap();
+    let prev = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let tools = host.tools();
+    let bash = tools.iter().find(|t| t.name() == "bash").unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let out = rt.block_on(bash.execute(pirs_agent::ToolExecContext {
+        tool_call_id: "t".into(),
+        args: serde_json::json!({"command": "echo docker-fallback-ok && whoami"}),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        on_update: None,
+    }));
+
+    std::env::set_current_dir(prev).unwrap();
+    let text = out.unwrap().content[0].as_text().unwrap().to_string();
+    assert!(
+        text.contains("docker-fallback-ok"),
+        "expected the command to actually run inside the docker fallback, got: {text}"
+    );
+    assert!(
+        text.contains("sandboxed via docker fallback"),
+        "expected the output to be transparently annotated as having used the fallback, got: {text}"
+    );
     assert!(!dir.path().join(".pirs").join("sandbox-tmp").exists());
 }
