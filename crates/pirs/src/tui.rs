@@ -22,6 +22,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
 
 use crate::approval::ApprovalMode;
+use crate::session_stats::{self, SessionClock};
 
 // ── Theme ───────────────────────────────────────────────────────────────────
 
@@ -534,6 +535,8 @@ struct App {
     /// so this is handled at the application level instead of waiting on
     /// upstream.
     desired_cursor: Option<(u16, u16)>,
+    /// Session wall / agent-busy timers for exit stats.
+    clock: SessionClock,
 }
 
 impl App {
@@ -793,6 +796,7 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
         total_rows: 0,
         last_draw_width: 0,
         desired_cursor: None,
+        clock: SessionClock::new(),
     };
 
     app.push(ChatItem::System(welcome_banner(
@@ -875,9 +879,13 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
         }
         while let Ok(ok) = done_rx.try_recv() {
             app.running = false;
+            app.clock.agent_end();
             app.dirty = true;
             let report = {
                 let a = agent.lock().await;
+                // Count tools from any new messages since last sample is hard;
+                // re-absorb full history tool results (idempotent if we reset
+                // tool counters — we don't; only count on live events below).
                 a.usage_report()
             };
             let total = report.grand_total();
@@ -926,6 +934,10 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
             }
         }
 
+        if app.should_quit {
+            break;
+        }
+
         if !app.dirty {
             continue;
         }
@@ -959,6 +971,22 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
     // Explicit restore before Drop (Drop is best-effort).
     restore_terminal()?;
     drop(_guard);
+
+    // Session stats after the alternate screen is gone (qwen-code-style exit summary).
+    {
+        app.clock.agent_end();
+        let report = {
+            let a = agent.lock().await;
+            a.usage_report()
+        };
+        session_stats::print_session_stats(
+            &app.clock,
+            &report,
+            &app.model,
+            app.plan_model.as_deref(),
+            app.strategy.as_deref(),
+        );
+    }
 
     if let Some(h) = &opts.host {
         for err in h.drain_hook_errors() {
@@ -1301,6 +1329,8 @@ fn submit_input(
         app.set_status("steering…");
     } else {
         app.running = true;
+        app.clock.mark_user_turn();
+        app.clock.agent_start();
         let status = if app.strategy.is_some() {
             format!(
                 "strategy:{} · model:{}{}",
@@ -1396,29 +1426,25 @@ fn handle_slash_command(
                 }
             }
         }
-        "/usage" => {
+        "/usage" | "/stats" => {
             match agent.try_lock() {
                 Ok(a) => {
                     let r = a.usage_report();
-                    let t = r.grand_total();
-                    let mut lines = vec![format!(
-                        "usage: {} calls · in {} · out {} · total {}",
-                        r.calls.len(),
-                        t.input,
-                        t.output,
-                        t.total_tokens
-                    )];
-                    for (m, u) in &r.by_model {
-                        lines.push(format!("  {m}: in {} out {}", u.input, u.output));
-                    }
-                    app.notice(lines.join("\n"));
+                    let text = session_stats::format_session_stats(
+                        &app.clock,
+                        &r,
+                        &app.model,
+                        app.plan_model.as_deref(),
+                        app.strategy.as_deref(),
+                    );
+                    app.notice(text);
                 }
-                Err(_) => app.notice("busy — try /usage after the run finishes"),
+                Err(_) => app.notice("busy — try /stats after the run finishes"),
             }
         }
         other => {
             app.notice(format!(
-                "unknown command {other} — try /model /plan-model /strategy /usage /help"
+                "unknown command {other} — try /model /plan-model /strategy /stats /help"
             ));
         }
     }
@@ -1934,7 +1960,7 @@ fn draw_help_overlay(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
             theme.assistant_text,
         )),
         Line::from(Span::styled(
-            "  /usage  /help  /clear  /quit",
+            "  /stats  /usage  /help  /clear  /quit",
             theme.assistant_text,
         )),
         Line::from(""),
@@ -2121,6 +2147,7 @@ fn apply_agent_event(app: &mut App, event: AgentEvent) {
             });
         }
         AgentEvent::ToolExecutionEnd { result, .. } => {
+            app.clock.mark_tool(result.is_error);
             // Prefer details.uiText (full) over model-capped content for display.
             let text = result.display_text();
             let preview: String = text.lines().take(8).collect::<Vec<_>>().join("\n");
@@ -2587,6 +2614,7 @@ mod tests {
             total_rows: 0,
             last_draw_width: 0,
             desired_cursor: None,
+            clock: SessionClock::new(),
         }
     }
 

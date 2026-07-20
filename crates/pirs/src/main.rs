@@ -25,6 +25,7 @@ mod system_prompt;
 mod tui;
 mod observability;
 mod registry;
+mod session_stats;
 mod weak_compose;
 
 #[derive(Parser)]
@@ -1777,6 +1778,7 @@ async fn repl(
     approval_shared: std::sync::Arc<std::sync::Mutex<approval::ApprovalMode>>,
 ) -> anyhow::Result<()> {
     let mut rl = DefaultEditor::new()?;
+    let mut clock = session_stats::SessionClock::new();
     println!("pirs — pi agent harness, Rust port. /help for commands, Ctrl-D to quit.");
     loop {
         match rl.readline("pirs> ") {
@@ -1795,6 +1797,7 @@ async fn repl(
                         file_commands,
                         printer,
                         &approval_shared,
+                        &mut clock,
                     )
                     .await
                     {
@@ -1816,15 +1819,27 @@ async fn repl(
                 }
                 let mode = *approval_shared.lock().unwrap();
                 let sp = session_path.lock().unwrap().clone();
+                clock.mark_user_turn();
+                clock.agent_start();
+                let before = agent.messages.len();
                 if let Err(e) = run_turn(agent, line, printer, &sp, mode, host).await {
                     eprintln!("[error: {e}]");
                 }
+                clock.agent_end();
+                clock.absorb_messages(&agent.messages[before..]);
             }
             Err(ReadlineError::Interrupted) => continue,
             Err(ReadlineError::Eof) => break,
             Err(e) => bail!(e),
         }
     }
+    session_stats::print_session_stats(
+        &clock,
+        &agent.usage_report(),
+        &agent.model,
+        None,
+        None,
+    );
     Ok(())
 }
 
@@ -1863,6 +1878,7 @@ async fn handle_command(
     file_commands: &[discovery::FileCommand],
     printer: &Arc<Printer>,
     approval_shared: &std::sync::Arc<std::sync::Mutex<approval::ApprovalMode>>,
+    clock: &mut session_stats::SessionClock,
 ) -> anyhow::Result<bool> {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
@@ -1875,9 +1891,11 @@ async fn handle_command(
             }
             println!(
                 "/model [id]   show or set model\n\
+                 /stats        session wall time, agent time, tokens\n\
+                 /usage        same as /stats\n\
                  /export <p>   export session to a JSONL file\n\
-                 /compact      (not implemented) \n\
-                 /quit         exit\n\
+                 /compact      compact history now\n\
+                 /quit         exit (prints session stats)\n\
                  !<cmd>        run command locally, record output in context\n\
                  !!<cmd>       run command locally, do not record"
             );
@@ -1890,8 +1908,14 @@ async fn handle_command(
                 println!("model set to {arg}");
             }
         }
-        "/usage" => {
-            print_usage(&agent.usage_report());
+        "/usage" | "/stats" => {
+            session_stats::print_session_stats(
+                clock,
+                &agent.usage_report(),
+                &agent.model,
+                None,
+                None,
+            );
         }
         "/approval" => {
             if arg.is_empty() {
