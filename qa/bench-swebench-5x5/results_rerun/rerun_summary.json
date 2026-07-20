@@ -1,0 +1,80 @@
+[
+  {
+    "id": "astropy__astropy-6938",
+    "model": "deepseek-v4-flash",
+    "label": "no-strategy",
+    "image": "swebench/sweb.eval.x86_64.astropy_1776_astropy-6938:latest",
+    "container": "pirsbench-astropy--astropy-6938-no-strategy",
+    "exit_code": 0,
+    "elapsed_s": 113.9,
+    "solved": true,
+    "stderr_tail": "strategy: none\nsession: turns=24 tools=28 [bash:8 read:7 grep:6 run_tests:4 code_map:1 edit:1 ls:1]\ntokens by model:\n  deepseek-v4-flash: in=6808 cache_r=172544 cache_w=0 out=4546 reasoning=1201 total=183898 \u2014 $0.0189\n  TOTAL: in=6808 cache_r=172544 cache_w=0 out=4546 reasoning=1201 total=183898 \u2014 $0.0189\ntiming (total 113.82s):\n  fix: 83.67s (74%)\n  discover: 14.85s (13%)\n  bootstrap: 9.24s (8%)\n  verify: 3.63s (3% n=2)\n  baseline: 2.41s (2%)\n  patch: 0.02s (0%)\n  fix\u2192tools: run_tests:22.61s bash:4.08s code_map:2.03s grep:0.13s edit:0.02s read:0.00s ls:0.00s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (536 bytes)",
+    "patch_copied": true,
+    "patch_bytes": 536
+  },
+  {
+    "id": "astropy__astropy-6938",
+    "model": "deepseek-v4-flash",
+    "label": "monolithic-v2",
+    "image": "swebench/sweb.eval.x86_64.astropy_1776_astropy-6938:latest",
+    "container": "pirsbench-astropy--astropy-6938-monolithic-v2",
+    "exit_code": 0,
+    "elapsed_s": 175.1,
+    "solved": true,
+    "stderr_tail": "strategy: monolithic\nsession: turns=38 tools=43 [bash:22 read:10 grep:4 code_map:2 edit:2 run_tests:2 find:1]\ntokens by model:\n  deepseek-v4-flash: in=15294 cache_r=463616 cache_w=0 out=10379 reasoning=4517 total=489289 \u2014 $0.0480\n  TOTAL: in=15294 cache_r=463616 cache_w=0 out=10379 reasoning=4517 total=489289 \u2014 $0.0480\ntiming (total 175.04s):\n  fix: 145.00s (83%)\n  discover: 14.91s (9%)\n  bootstrap: 9.09s (5%)\n  verify: 3.58s (2% n=2)\n  baseline: 2.43s (1%)\n  patch: 0.02s (0%)\n  fix\u2192tools: bash:17.19s run_tests:11.27s code_map:1.99s grep:0.25s edit:0.03s find:0.02s read:0.00s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (518 bytes)",
+    "patch_copied": true,
+    "patch_bytes": 518
+  },
+  {
+    "id": "scikit-learn__scikit-learn-12471",
+    "model": "deepseek-v4-flash",
+    "label": "monolithic-v2",
+    "image": "swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-12471:latest",
+    "container": "pirsbench-scikit-learn--scikit-learn-12471-monolithic-v2",
+    "exit_code": 0,
+    "elapsed_s": 126.1,
+    "solved": true,
+    "stderr_tail": "strategy: monolithic\nsession: turns=14 tools=14 [read:4 run_tests:4 edit:2 find:2 bash:1 grep:1]\ntokens by model:\n  deepseek-v4-flash: in=25141 cache_r=263808 cache_w=0 out=4945 reasoning=3082 total=293894 \u2014 $0.0307\n  TOTAL: in=25141 cache_r=263808 cache_w=0 out=4945 reasoning=3082 total=293894 \u2014 $0.0307\ntiming (total 126.07s):\n  fix: 103.04s (82%)\n  discover: 11.18s (9%)\n  bootstrap: 6.53s (5%)\n  verify: 2.94s (2% n=2)\n  baseline: 2.36s (2%)\n  patch: 0.02s (0%)\n  fix\u2192tools: run_tests:45.53s bash:0.54s find:0.07s edit:0.01s read:0.00s grep:0.00s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (791 bytes)",
+    "patch_copied": true,
+    "patch_bytes": 791
+  },
+  {
+    "id": "scikit-learn__scikit-learn-12471",
+    "model": "deepseek-v4-flash",
+    "label": "no-strategy",
+    "image": "swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-12471:latest",
+    "container": "pirsbench-scikit-learn--scikit-learn-12471-no-strategy",
+    "exit_code": 0,
+    "elapsed_s": 84.9,
+    "solved": true,
+    "stderr_tail": "strategy: none\nsession: turns=13 tools=14 [grep:5 read:4 find:2 run_tests:2 edit:1]\ntokens by model:\n  deepseek-v4-flash: in=12019 cache_r=147712 cache_w=0 out=4224 reasoning=2661 total=163955 \u2014 $0.0182\n  TOTAL: in=12019 cache_r=147712 cache_w=0 out=4224 reasoning=2661 total=163955 \u2014 $0.0182\ntiming (total 84.89s):\n  fix: 61.71s (73%)\n  discover: 11.44s (13%)\n  bootstrap: 6.44s (8%)\n  verify: 2.95s (3% n=2)\n  baseline: 2.32s (3%)\n  patch: 0.03s (0%)\n  fix\u2192tools: run_tests:9.57s find:0.12s grep:0.11s edit:0.02s read:0.00s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (664 bytes)",
+    "patch_copied": true,
+    "patch_bytes": 664
+  },
+  {
+    "id": "sphinx-doc__sphinx-7686",
+    "model": "deepseek-v4-flash",
+    "label": "monolithic-v2",
+    "image": "swebench/sweb.eval.x86_64.sphinx-doc_1776_sphinx-7686:latest",
+    "container": "pirsbench-sphinx-doc--sphinx-7686-monolithic-v2",
+    "exit_code": 0,
+    "elapsed_s": 287.4,
+    "solved": true,
+    "stderr_tail": "strategy: monolithic\nsession: turns=59 tools=60 [read:22 bash:20 grep:13 edit:2 find:1 ls:1 run_tests:1]\ntokens by model:\n  deepseek-v4-flash: in=57409 cache_r=1508224 cache_w=0 out=25233 reasoning=18709 total=1590866 \u2014 $0.1488\n  TOTAL: in=57409 cache_r=1508224 cache_w=0 out=25233 reasoning=18709 total=1590866 \u2014 $0.1488\ntiming (total 287.33s):\n  fix: 269.55s (94% n=2)\n  verify: 5.48s (2% n=3)\n  baseline: 4.36s (2%)\n  discover: 4.11s (1%)\n  bootstrap: 3.80s (1%)\n  patch: 0.03s (0%)\n  fix\u2192tools: bash:10.86s grep:0.17s edit:0.03s run_tests:0.01s find:0.01s read:0.01s ls:0.00s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (1398 bytes)",
+    "patch_copied": true,
+    "patch_bytes": 1398
+  },
+  {
+    "id": "sphinx-doc__sphinx-7686",
+    "model": "deepseek-v4-flash",
+    "label": "no-strategy",
+    "image": "swebench/sweb.eval.x86_64.sphinx-doc_1776_sphinx-7686:latest",
+    "container": "pirsbench-sphinx-doc--sphinx-7686-no-strategy",
+    "exit_code": 0,
+    "elapsed_s": 344.1,
+    "solved": true,
+    "stderr_tail": "strategy: none\nsession: turns=80 tools=84 [bash:38 read:20 grep:11 run_tests:6 edit:4 find:2 ls:2 asset:1]\ntokens by model:\n  deepseek-v4-flash: in=52519 cache_r=2951296 cache_w=0 out=25802 reasoning=16017 total=3029617 \u2014 $0.2492\n  TOTAL: in=52519 cache_r=2951296 cache_w=0 out=25802 reasoning=16017 total=3029617 \u2014 $0.2492\ntiming (total 344.02s):\n  fix: 326.77s (95% n=2)\n  verify: 5.41s (2% n=3)\n  baseline: 4.28s (1%)\n  discover: 4.03s (1%)\n  bootstrap: 3.49s (1%)\n  patch: 0.03s (0%)\n  fix\u2192tools: bash:18.94s run_tests:9.23s find:0.06s edit:0.04s grep:0.03s read:0.01s ls:0.00s asset:0.00s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (1796 bytes)",
+    "patch_copied": true,
+    "patch_bytes": 1796
+  }
+]

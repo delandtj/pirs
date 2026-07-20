@@ -1,0 +1,13 @@
+{
+  "id": "sphinx-doc__sphinx-7686",
+  "model": "deepseek-v4-flash",
+  "label": "no-strategy",
+  "image": "swebench/sweb.eval.x86_64.sphinx-doc_1776_sphinx-7686:latest",
+  "container": "pirsbench-sphinx-doc--sphinx-7686-no-strategy",
+  "exit_code": 0,
+  "elapsed_s": 344.1,
+  "solved": true,
+  "stderr_tail": "strategy: none\nsession: turns=80 tools=84 [bash:38 read:20 grep:11 run_tests:6 edit:4 find:2 ls:2 asset:1]\ntokens by model:\n  deepseek-v4-flash: in=52519 cache_r=2951296 cache_w=0 out=25802 reasoning=16017 total=3029617 \u2014 $0.2492\n  TOTAL: in=52519 cache_r=2951296 cache_w=0 out=25802 reasoning=16017 total=3029617 \u2014 $0.2492\ntiming (total 344.02s):\n  fix: 326.77s (95% n=2)\n  verify: 5.41s (2% n=3)\n  baseline: 4.28s (1%)\n  discover: 4.03s (1%)\n  bootstrap: 3.49s (1%)\n  patch: 0.03s (0%)\n  fix\u2192tools: bash:18.94s run_tests:9.23s find:0.06s edit:0.04s grep:0.03s read:0.01s ls:0.00s asset:0.00s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (1796 bytes)",
+  "patch_copied": true,
+  "patch_bytes": 1796
+}

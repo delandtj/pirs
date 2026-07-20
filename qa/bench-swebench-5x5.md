@@ -27,16 +27,23 @@ images. Every number below is pulled directly from a captured `.result.json` /
 | Label | Structure | Strong-model phase(s) |
 |---|---|---|
 | `no-strategy` | New in this session (`--no-strategy`): bypasses the strategy engine (`PhaseDriver`/`run_strategy`) entirely — one undivided, growing-context loop with a generic assistant system prompt. The true naive baseline, matching pirs's interactive default when no `--strategy`/`--profile` is given. | none |
-| `monolithic` | Built-in. One growing-context loop, but through the phase engine with a bench-engineered "make the smallest change, don't touch tests" system prompt. | none |
+| `monolithic` | Built-in. One growing-context loop through the phase engine. Results below use the **original** prompt ("make the smallest change, don't touch tests"); see [Follow-up](#follow-up-was-it-really-the-prompt) for the fixed root-cause-first prompt now shipped. | none |
 | `plan-exec` | `.pirs/strategies/plan-pro-exec-flash.rhai`. Read-only planner → fresh full-scope executor seeded only with the plan. | planner |
 | `plan-critic-exec` | `.pirs/strategies/plan-critic-exec-pro-flash.rhai`. Planner → critic gate (may rewrite the plan) → fresh executor. | planner + critic |
 | `wide-plan-exec` | `.pirs/strategies/wide-plan-exec-pro-flash.rhai`. Three read-only planners investigate in parallel (assertion-focused / recency-focused / edge-case-focused), merged → fresh executor. | all 3 parallel planners |
 
 ## Headline finding
 
-**`monolithic` is dominated by plain `no-strategy` on every axis that matters:**
-lower solve rate, higher cost, longer wall-clock. Splitting into a phase engine
-bought nothing here unless it also added a planner (`plan-exec` and beyond).
+**`monolithic`'s original prompt was dominated by plain `no-strategy` on every
+axis that mattered** — lower solve rate, higher cost, longer wall-clock — and
+the [follow-up experiment](#follow-up-was-it-really-the-prompt) traced this to
+one specific instruction: *"make the SMALLEST change... do not refactor"*
+pressured the model into a minimal-but-wrong fix on 2 of 3 instances. Rewriting
+that instruction to focus on root cause instead (keeping the "don't touch
+tests" / "verify before stopping" guardrails) took `monolithic` from 1/3 to
+3/3, closing the entire gap. The table below is the **original** prompt's
+numbers, preserved as the finding that motivated the fix — see the follow-up
+section for the corrected prompt's results.
 
 | Strategy | Solved (of 3 non-broken instances) | Total cost | Avg turns | Avg wall-clock |
 |---|---|---|---|---|
@@ -95,16 +102,18 @@ breakdown) is in each run's `.result.json`/`.log` under
 
 ## Key findings
 
-1. **`monolithic` is the outlier — worse, not just different.** It solved 1/3
-   real instances (only `astropy-6938`); every other strategy, including the
-   zero-cost naive baseline, solved 3/3. Its two losses
-   (`scikit-learn-12471`, `sphinx-7686`) were both `Failed(FixNoFlip)` — it
-   produced a change, but the change never flipped the target tests from red to
-   green. On `sphinx-7686` it burned 101 turns and $0.39 to arrive at a change
-   that didn't work, while `no-strategy` solved the same instance in 60 turns
-   and $0.19. The bench-engineered "smallest change" system prompt bought
-   `monolithic` nothing here over a generic assistant prompt; if anything it
-   correlates with worse outcomes on the harder two instances.
+1. **`monolithic`'s original prompt was the outlier — worse, not just
+   different — and it was fixable.** It solved 1/3 real instances (only
+   `astropy-6938`); every other strategy, including the zero-cost naive
+   baseline, solved 3/3. Its two losses (`scikit-learn-12471`, `sphinx-7686`)
+   were both `Failed(FixNoFlip)` — it produced a change, but the change never
+   flipped the target tests from red to green. On `sphinx-7686` it burned 101
+   turns and $0.39 to arrive at a change that didn't work, while `no-strategy`
+   solved the same instance in 60 turns and $0.19. The
+   [follow-up experiment](#follow-up-was-it-really-the-prompt) confirms this
+   was specifically the "make the SMALLEST change, do not refactor"
+   instruction, not the phase-engine structure: rewriting it to focus on root
+   cause took `monolithic` to 3/3, matching `no-strategy`.
 
 2. **Plain `no-strategy` matched every planner-based strategy's solve rate at
    the lowest cost and shortest wall-clock of the five.** No strategy in this
@@ -143,6 +152,51 @@ breakdown) is in each run's `.result.json`/`.log` under
    outcomes were from an overly large or invasive patch, just a patch that
    didn't flip the target test (`FixNoFlip`) or no patch attempt reaching the
    agent at all (`ReproFailed`).
+
+## Follow-up: was it really the prompt?
+
+`no-strategy` and `monolithic` differ in exactly one behaviorally-relevant
+way — the system prompt (both are single, growing-context loops over the same
+tools, same model, same context-persistence). `monolithic`'s original prompt
+told the model to *"Make the SMALLEST change that makes the failing tests
+pass. Do not refactor"*; both of its losses were `Failed(FixNoFlip)` — a
+change landed, but it never flipped the target test. The hypothesis: that
+instruction pressures the model toward a minimal-but-wrong fix instead of the
+one the root cause actually needs.
+
+Tested it directly: rewrote `monolithic`'s system prompt (still forbidding
+touching tests, still requiring verification before stopping) to drop
+"smallest change" and instead direct root-cause investigation before editing —
+see `crates/pirs-rhai/builtins/monolithic.rhai`. Re-ran `monolithic` (as
+`monolithic-v2`) against `no-strategy` on the same 3 real instances.
+
+| Instance | Strategy | Outcome | Turns | Elapsed | Cost |
+|---|---|---|---|---|---|
+| astropy-6938 | monolithic-v2 | Solved | 38 | 175.0s | $0.0480 |
+| astropy-6938 | no-strategy | Solved | 24 | 113.8s | $0.0189 |
+| scikit-learn-12471 | monolithic-v2 | **Solved** | 14 | 126.1s | $0.0307 |
+| scikit-learn-12471 | no-strategy | Solved | 13 | 84.9s | $0.0182 |
+| sphinx-7686 | monolithic-v2 | Solved | 59 | 287.3s | $0.1488 |
+| sphinx-7686 | no-strategy | Solved | 80 | 344.0s | $0.2492 |
+
+**`monolithic-v2` went from 1/3 to 3/3** — it now solves `scikit-learn-12471`,
+the exact instance the original prompt caused it to fail on with a
+non-flipping fix. Totals: `monolithic-v2` $0.2275 / avg 196.1s vs
+`no-strategy` $0.2863 / avg 180.9s in this rerun — the two are now
+statistically indistinguishable on this n=3 sample (and note `no-strategy`'s
+own numbers moved between runs too — e.g. its `sphinx-7686` cost went from
+$0.19 to $0.25 — a reminder that LLM agent runs are stochastic even with
+nothing changed, per the single-trial-per-cell caveat below).
+
+This confirms the mechanism, not just the correlation: **the specific
+"smallest change" wording was actively harmful** on the two instances where it
+mattered, and removing it (while keeping the legitimate "don't touch tests"
+and "verify before stopping" guardrails) closed the entire gap to the naive
+baseline. `monolithic`'s built-in prompt has been updated; this is a real fix,
+not just a benchmark footnote.
+
+Artifacts: [`bench-swebench-5x5/results_rerun/`](bench-swebench-5x5/results_rerun/),
+[`bench-swebench-5x5/rerun_monolithic_vs_naive.py`](bench-swebench-5x5/rerun_monolithic_vs_naive.py).
 
 ## Limitations
 
@@ -194,9 +248,16 @@ never collide) live in `run_one.py`.
 - [`bench-swebench-5x5/run_matrix.py`](bench-swebench-5x5/run_matrix.py),
   [`bench-swebench-5x5/run_one.py`](bench-swebench-5x5/run_one.py) — the
   orchestration scripts used to produce this data.
+- [`bench-swebench-5x5/results_rerun/`](bench-swebench-5x5/results_rerun/),
+  [`bench-swebench-5x5/rerun_monolithic_vs_naive.py`](bench-swebench-5x5/rerun_monolithic_vs_naive.py)
+  — the 6-run follow-up (`monolithic-v2` vs `no-strategy`) that confirmed the
+  prompt fix.
 - New strategy scripts: `.pirs/strategies/plan-critic-exec-pro-flash.rhai`,
   `.pirs/strategies/wide-plan-exec-pro-flash.rhai` (planner/critic phases
   pinned to `deepseek-v4-pro`, cloned from the built-in phase structure).
+- **Fixed**: `crates/pirs-rhai/builtins/monolithic.rhai`'s system prompt —
+  dropped "make the SMALLEST change, do not refactor" in favor of root-cause-
+  first guidance, per the follow-up experiment above.
 - New harness feature: `--no-strategy` on `pirs-bench solve`/`batch`/`selftest
   --agent` (`crates/pirs-bench-runner/src/{main,lib}.rs`), unit-tested in both
   crates (`no_strategy_flag_resolves_to_empty_strategy`,

@@ -1,0 +1,22 @@
+=== astropy__astropy-6938 (deepseek-v4-flash) start 1784543810.737496 ===
+1394d527545e21dcf94a347a0e0499b3b0611df380f242d0ac7259c9d622ce5e
+head_sha=debba5eafa51e982b3effcc7df072a97693db3a4
+cmd: pirs-bench solve /testbed -t astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_ascii_table_data -t astropy/io/fits/tests/test_table.py::TestTableFunctions::test_ascii_table -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_sample_file -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_image_create -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_scaled_data -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_scaled_data_auto_rescale -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_uint16_data -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_groups_hdu_data -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_open_with_no_keywords -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_writeto_convenience -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_hdu_writeto -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_datasum_only -k astropy/io/fits/tests/test_table.py::test_regression_scalar_indexing --issue-file /tmp/issue.md --base-sha debba5eafa51e982b3effcc7df072a97693db3a4 --provider deepseek --model deepseek-v4-flash --max-turns 40 --out /tmp/out.patch
+
+strategy: monolithic
+session: turns=38 tools=43 [bash:22 read:10 grep:4 code_map:2 edit:2 run_tests:2 find:1]
+tokens by model:
+  deepseek-v4-flash: in=15294 cache_r=463616 cache_w=0 out=10379 reasoning=4517 total=489289 — $0.0480
+  TOTAL: in=15294 cache_r=463616 cache_w=0 out=10379 reasoning=4517 total=489289 — $0.0480
+timing (total 175.04s):
+  fix: 145.00s (83%)
+  discover: 14.91s (9%)
+  bootstrap: 9.09s (5%)
+  verify: 3.58s (2% n=2)
+  baseline: 2.43s (1%)
+  patch: 0.02s (0%)
+  fix→tools: bash:17.19s run_tests:11.27s code_map:1.99s grep:0.25s edit:0.03s find:0.02s read:0.00s
+outcome: Solved
+patch written to "/tmp/out.patch" (518 bytes)
+
+exit_code=0 elapsed_s=175.1

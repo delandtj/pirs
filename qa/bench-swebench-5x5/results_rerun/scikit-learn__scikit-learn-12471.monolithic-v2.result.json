@@ -1,0 +1,13 @@
+{
+  "id": "scikit-learn__scikit-learn-12471",
+  "model": "deepseek-v4-flash",
+  "label": "monolithic-v2",
+  "image": "swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-12471:latest",
+  "container": "pirsbench-scikit-learn--scikit-learn-12471-monolithic-v2",
+  "exit_code": 0,
+  "elapsed_s": 126.1,
+  "solved": true,
+  "stderr_tail": "strategy: monolithic\nsession: turns=14 tools=14 [read:4 run_tests:4 edit:2 find:2 bash:1 grep:1]\ntokens by model:\n  deepseek-v4-flash: in=25141 cache_r=263808 cache_w=0 out=4945 reasoning=3082 total=293894 \u2014 $0.0307\n  TOTAL: in=25141 cache_r=263808 cache_w=0 out=4945 reasoning=3082 total=293894 \u2014 $0.0307\ntiming (total 126.07s):\n  fix: 103.04s (82%)\n  discover: 11.18s (9%)\n  bootstrap: 6.53s (5%)\n  verify: 2.94s (2% n=2)\n  baseline: 2.36s (2%)\n  patch: 0.02s (0%)\n  fix\u2192tools: run_tests:45.53s bash:0.54s find:0.07s edit:0.01s read:0.00s grep:0.00s\noutcome: Solved\npatch written to \"/tmp/out.patch\" (791 bytes)",
+  "patch_copied": true,
+  "patch_bytes": 791
+}

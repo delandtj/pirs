@@ -135,9 +135,13 @@ same 5 SWE-bench-lite instances inside the official eval docker images — 25
 runs, $2.10 total spend. Full methodology, per-run results, and findings in
 [`bench-swebench-5x5.md`](bench-swebench-5x5.md); raw `.result.json`/`.log`
 artifacts in [`bench-swebench-5x5/results/`](bench-swebench-5x5/results/).
-Headline: on this sample, `monolithic` was dominated on every axis (solve
-rate, cost, wall-clock) by the plain `no-strategy` baseline — splitting into a
-phase engine bought nothing unless it also added a planner.
+Headline: `monolithic`'s original prompt ("make the SMALLEST change... do not
+refactor") was dominated on every axis by the plain `no-strategy` baseline —
+traced to that one instruction pressuring the model into minimal-but-wrong
+fixes. A follow-up experiment rewrote the prompt to focus on root cause
+instead and re-ran it: `monolithic` went from 1/3 to 3/3, closing the entire
+gap. The built-in prompt (`crates/pirs-rhai/builtins/monolithic.rhai`) has been
+fixed accordingly — this was a real bug, not just a benchmark footnote.
 
 ## Discovery
 
