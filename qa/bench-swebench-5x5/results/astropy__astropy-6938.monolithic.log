@@ -1,0 +1,22 @@
+=== astropy__astropy-6938 (deepseek-v4-flash) start 1784538211.7768843 ===
+bfc517b87b92591c5d8ea5a1071a2177543489e921de87aa7322d93be24e4016
+head_sha=c4936ec35839225b7030bc1d2e8c2f533237b8d9
+cmd: pirs-bench solve /testbed -t astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_ascii_table_data -t astropy/io/fits/tests/test_table.py::TestTableFunctions::test_ascii_table -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_sample_file -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_image_create -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_scaled_data -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_scaled_data_auto_rescale -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_uint16_data -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_groups_hdu_data -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_open_with_no_keywords -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_writeto_convenience -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_hdu_writeto -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_datasum_only -k astropy/io/fits/tests/test_table.py::test_regression_scalar_indexing --issue-file /tmp/issue.md --base-sha c4936ec35839225b7030bc1d2e8c2f533237b8d9 --provider deepseek --model deepseek-v4-flash --max-turns 40 --out /tmp/out.patch
+
+strategy: monolithic
+session: turns=26 tools=25 [bash:8 run_tests:7 read:6 edit:2 grep:2]
+tokens by model:
+  deepseek-v4-flash: in=14050 cache_r=271488 cache_w=0 out=5505 reasoning=2922 total=291043 — $0.0289
+  TOTAL: in=14050 cache_r=271488 cache_w=0 out=5505 reasoning=2922 total=291043 — $0.0289
+timing (total 202.14s):
+  fix: 172.11s (85%)
+  discover: 14.87s (7%)
+  bootstrap: 9.16s (5%)
+  verify: 3.65s (2% n=2)
+  baseline: 2.32s (1%)
+  patch: 0.02s (0%)
+  fix→tools: run_tests:60.25s bash:51.17s edit:0.03s grep:0.02s read:0.00s
+outcome: Solved
+patch written to "/tmp/out.patch" (518 bytes)
+
+exit_code=0 elapsed_s=202.2

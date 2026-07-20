@@ -13,3 +13,6 @@ target/
 # QA proof artifacts are intentional (override *.log)
 !qa/live/
 !qa/live/*.log
+!qa/bench-swebench-5x5/
+!qa/bench-swebench-5x5/results/
+!qa/bench-swebench-5x5/results/*.log

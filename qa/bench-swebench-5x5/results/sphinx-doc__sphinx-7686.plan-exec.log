@@ -1,0 +1,23 @@
+=== sphinx-doc__sphinx-7686 (deepseek-v4-flash) start 1784539958.4276278 ===
+f6386c4a02a08d54454ec1451561a80412400b34a777ac271f64627916dcae99
+head_sha=bd6084dc72afb3137b332f4272aef734c991148a
+cmd: pirs-bench solve /testbed -t tests/test_ext_autosummary.py::test_autosummary_generate_content_for_module -t tests/test_ext_autosummary.py::test_autosummary_generate_content_for_module_skipped -k tests/test_ext_autosummary.py::test_mangle_signature -k tests/test_ext_autosummary.py::test_escaping -k tests/test_ext_autosummary.py::test_autosummary_generate -k tests/test_ext_autosummary.py::test_autosummary_generate_overwrite1 -k tests/test_ext_autosummary.py::test_autosummary_generate_overwrite2 -k tests/test_ext_autosummary.py::test_autosummary_recursive -k tests/test_ext_autosummary.py::test_autosummary_latex_table_colspec -k tests/test_ext_autosummary.py::test_import_by_name -k tests/test_ext_autosummary.py::test_autosummary_imported_members -k tests/test_ext_autosummary.py::test_generate_autosummary_docs_property -k tests/test_ext_autosummary.py::test_autosummary_skip_member -k tests/test_ext_autosummary.py::test_autosummary_template -k tests/test_ext_autosummary.py::test_empty_autosummary_generate -k tests/test_ext_autosummary.py::test_invalid_autosummary_generate -k tests/test_ext_autosummary.py::test_autogen --issue-file /tmp/issue.md --base-sha bd6084dc72afb3137b332f4272aef734c991148a --provider deepseek --model deepseek-v4-flash --max-turns 40 --out /tmp/out.patch --strategy-script /tmp/strategy.rhai
+
+strategy: plan-pro-exec-flash
+session: turns=171 tools=175 [read:63 bash:59 grep:28 find:8 run_tests:8 edit:7 code_map:2]
+tokens by model:
+  deepseek-v4-flash: in=64251 cache_r=2405888 cache_w=0 out=48410 reasoning=33725 total=2518549 — $0.2390
+  deepseek-v4-pro: in=70558 cache_r=1893120 cache_w=0 out=109941 reasoning=102790 total=2073619 — $0.2725
+  TOTAL: in=134809 cache_r=4299008 cache_w=0 out=158351 reasoning=136515 total=4592168 — $0.5115
+timing (total 2123.26s):
+  fix: 2105.81s (99% n=3)
+  verify: 5.67s (0% n=4)
+  baseline: 4.31s (0%)
+  discover: 3.98s (0%)
+  bootstrap: 3.46s (0%)
+  patch: 0.03s (0%)
+  fix→tools: bash:24.51s run_tests:6.35s code_map:0.86s grep:0.37s find:0.15s edit:0.07s read:0.02s
+outcome: Solved
+patch written to "/tmp/out.patch" (1903 bytes)
+
+exit_code=0 elapsed_s=2123.3

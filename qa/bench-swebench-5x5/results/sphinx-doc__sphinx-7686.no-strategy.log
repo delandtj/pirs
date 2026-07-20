@@ -1,0 +1,22 @@
+=== sphinx-doc__sphinx-7686 (deepseek-v4-flash) start 1784539635.4278507 ===
+81516488c73b6ce6ab9420253cbc3638f106a6699ddc3e88f2e6604478499385
+head_sha=38e80e212571a7308db399849f20d5ff89715571
+cmd: pirs-bench solve /testbed -t tests/test_ext_autosummary.py::test_autosummary_generate_content_for_module -t tests/test_ext_autosummary.py::test_autosummary_generate_content_for_module_skipped -k tests/test_ext_autosummary.py::test_mangle_signature -k tests/test_ext_autosummary.py::test_escaping -k tests/test_ext_autosummary.py::test_autosummary_generate -k tests/test_ext_autosummary.py::test_autosummary_generate_overwrite1 -k tests/test_ext_autosummary.py::test_autosummary_generate_overwrite2 -k tests/test_ext_autosummary.py::test_autosummary_recursive -k tests/test_ext_autosummary.py::test_autosummary_latex_table_colspec -k tests/test_ext_autosummary.py::test_import_by_name -k tests/test_ext_autosummary.py::test_autosummary_imported_members -k tests/test_ext_autosummary.py::test_generate_autosummary_docs_property -k tests/test_ext_autosummary.py::test_autosummary_skip_member -k tests/test_ext_autosummary.py::test_autosummary_template -k tests/test_ext_autosummary.py::test_empty_autosummary_generate -k tests/test_ext_autosummary.py::test_invalid_autosummary_generate -k tests/test_ext_autosummary.py::test_autogen --issue-file /tmp/issue.md --base-sha 38e80e212571a7308db399849f20d5ff89715571 --provider deepseek --model deepseek-v4-flash --max-turns 40 --out /tmp/out.patch --no-strategy
+
+strategy: none
+session: turns=60 tools=60 [bash:30 read:18 edit:7 grep:3 find:2]
+tokens by model:
+  deepseek-v4-flash: in=69985 cache_r=1971840 cache_w=0 out=32076 reasoning=24381 total=2073901 — $0.1922
+  TOTAL: in=69985 cache_r=1971840 cache_w=0 out=32076 reasoning=24381 total=2073901 — $0.1922
+timing (total 320.96s):
+  fix: 294.89s (92% n=2)
+  baseline: 7.77s (2%)
+  discover: 7.18s (2%)
+  bootstrap: 6.19s (2%)
+  verify: 4.91s (2% n=3)
+  patch: 0.02s (0%)
+  fix→tools: bash:17.60s edit:0.10s find:0.05s read:0.01s grep:0.00s
+outcome: Solved
+patch written to "/tmp/out.patch" (1919 bytes)
+
+exit_code=0 elapsed_s=321.0

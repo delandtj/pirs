@@ -1,0 +1,21 @@
+=== sphinx-doc__sphinx-7686 (deepseek-v4-flash) start 1784539765.386028 ===
+dcef84ec09bb9cdb877bda34e62919b1fa716d98b69830803c70e0370075f4a1
+head_sha=d0e9a7c3fca9327b01dda662eec88d745ba4ebac
+cmd: pirs-bench solve /testbed -t tests/test_ext_autosummary.py::test_autosummary_generate_content_for_module -t tests/test_ext_autosummary.py::test_autosummary_generate_content_for_module_skipped -k tests/test_ext_autosummary.py::test_mangle_signature -k tests/test_ext_autosummary.py::test_escaping -k tests/test_ext_autosummary.py::test_autosummary_generate -k tests/test_ext_autosummary.py::test_autosummary_generate_overwrite1 -k tests/test_ext_autosummary.py::test_autosummary_generate_overwrite2 -k tests/test_ext_autosummary.py::test_autosummary_recursive -k tests/test_ext_autosummary.py::test_autosummary_latex_table_colspec -k tests/test_ext_autosummary.py::test_import_by_name -k tests/test_ext_autosummary.py::test_autosummary_imported_members -k tests/test_ext_autosummary.py::test_generate_autosummary_docs_property -k tests/test_ext_autosummary.py::test_autosummary_skip_member -k tests/test_ext_autosummary.py::test_autosummary_template -k tests/test_ext_autosummary.py::test_empty_autosummary_generate -k tests/test_ext_autosummary.py::test_invalid_autosummary_generate -k tests/test_ext_autosummary.py::test_autogen --issue-file /tmp/issue.md --base-sha d0e9a7c3fca9327b01dda662eec88d745ba4ebac --provider deepseek --model deepseek-v4-flash --max-turns 40 --out /tmp/out.patch
+
+strategy: monolithic
+session: turns=101 tools=100 [bash:48 read:27 edit:14 grep:7 find:2 ls:1 run_tests:1]
+tokens by model:
+  deepseek-v4-flash: in=48116 cache_r=4673664 cache_w=0 out=46906 reasoning=32395 total=4768686 — $0.3917
+  TOTAL: in=48116 cache_r=4673664 cache_w=0 out=46906 reasoning=32395 total=4768686 — $0.3917
+timing (total 485.08s):
+  fix: 470.32s (97% n=3)
+  baseline: 4.28s (1%)
+  discover: 4.07s (1%)
+  bootstrap: 3.64s (1%)
+  verify: 2.75s (1% n=3)
+  rollback: 0.02s (0%)
+  fix→tools: bash:19.30s edit:0.14s find:0.03s run_tests:0.01s read:0.01s ls:0.00s grep:0.00s
+outcome: Failed(FixNoFlip)
+
+exit_code=1 elapsed_s=485.2

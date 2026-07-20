@@ -1,0 +1,23 @@
+=== astropy__astropy-6938 (deepseek-v4-flash) start 1784538302.3758183 ===
+0b14fb2018722bcfdc0f11455b6aad5affc42ee4926ecccc7d77d4d6a896736a
+head_sha=f20c8581775c82de4494685704aac5c21b34c391
+cmd: pirs-bench solve /testbed -t astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_ascii_table_data -t astropy/io/fits/tests/test_table.py::TestTableFunctions::test_ascii_table -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_sample_file -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_image_create -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_scaled_data -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_scaled_data_auto_rescale -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_uint16_data -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_groups_hdu_data -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_open_with_no_keywords -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_writeto_convenience -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_hdu_writeto -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_datasum_only -k astropy/io/fits/tests/test_table.py::test_regression_scalar_indexing --issue-file /tmp/issue.md --base-sha f20c8581775c82de4494685704aac5c21b34c391 --provider deepseek --model deepseek-v4-flash --max-turns 40 --out /tmp/out.patch --strategy-script /tmp/strategy.rhai
+
+strategy: plan-pro-exec-flash
+session: turns=19 tools=22 [grep:9 read:8 run_tests:4 edit:1]
+tokens by model:
+  deepseek-v4-flash: in=5255 cache_r=22656 cache_w=0 out=965 reasoning=123 total=28876 — $0.0041
+  deepseek-v4-pro: in=9076 cache_r=77440 cache_w=0 out=3961 reasoning=2472 total=90477 — $0.0122
+  TOTAL: in=14331 cache_r=100096 cache_w=0 out=4926 reasoning=2595 total=119353 — $0.0163
+timing (total 129.78s):
+  fix: 100.19s (77%)
+  discover: 14.29s (11%)
+  bootstrap: 9.23s (7%)
+  verify: 3.66s (3% n=2)
+  baseline: 2.38s (2%)
+  patch: 0.02s (0%)
+  fix→tools: run_tests:22.91s grep:0.03s edit:0.02s read:0.00s
+outcome: Solved
+patch written to "/tmp/out.patch" (518 bytes)
+
+exit_code=0 elapsed_s=129.8

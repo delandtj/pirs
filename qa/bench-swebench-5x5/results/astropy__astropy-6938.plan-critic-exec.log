@@ -1,0 +1,23 @@
+=== astropy__astropy-6938 (deepseek-v4-flash) start 1784538416.1639 ===
+d4b2f5761102f4768c1b1cceef35393417383fefd7a86dfff58a69feac104262
+head_sha=24142acc785af00f23869dfa114f3c57cc9dcad7
+cmd: pirs-bench solve /testbed -t astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_ascii_table_data -t astropy/io/fits/tests/test_table.py::TestTableFunctions::test_ascii_table -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_sample_file -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_image_create -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_scaled_data -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_scaled_data_auto_rescale -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_uint16_data -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_groups_hdu_data -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_open_with_no_keywords -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_writeto_convenience -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_hdu_writeto -k astropy/io/fits/tests/test_checksum.py::TestChecksumFunctions::test_datasum_only -k astropy/io/fits/tests/test_table.py::test_regression_scalar_indexing --issue-file /tmp/issue.md --base-sha 24142acc785af00f23869dfa114f3c57cc9dcad7 --provider deepseek --model deepseek-v4-flash --max-turns 40 --out /tmp/out.patch --strategy-script /tmp/strategy.rhai
+
+strategy: plan-critic-exec-pro-flash
+session: turns=43 tools=42 [grep:20 read:16 bash:2 run_tests:2 code_map:1 edit:1]
+tokens by model:
+  deepseek-v4-flash: in=5051 cache_r=19072 cache_w=0 out=800 reasoning=84 total=24923 — $0.0036
+  deepseek-v4-pro: in=39913 cache_r=453632 cache_w=0 out=9177 reasoning=5241 total=502722 — $0.0526
+  TOTAL: in=44964 cache_r=472704 cache_w=0 out=9977 reasoning=5325 total=527645 — $0.0562
+timing (total 211.43s):
+  fix: 182.11s (86%)
+  discover: 14.27s (7%)
+  bootstrap: 9.17s (4%)
+  verify: 3.55s (2% n=2)
+  baseline: 2.30s (1%)
+  patch: 0.02s (0%)
+  fix→tools: run_tests:11.25s code_map:1.99s bash:1.78s grep:0.26s edit:0.02s read:0.01s
+outcome: Solved
+patch written to "/tmp/out.patch" (518 bytes)
+
+exit_code=0 elapsed_s=211.5
