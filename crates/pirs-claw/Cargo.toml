@@ -1,0 +1,28 @@
+[package]
+name = "pirs-claw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lean personal assistant control plane (OpenClaw/Hermes alternative)"
+
+[[bin]]
+name = "pirs-claw"
+path = "src/main.rs"
+
+[dependencies]
+pirs-ai = { workspace = true }
+pirs-agent = { workspace = true }
+pirs-tools = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+directories = "6"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,5 +1,12 @@
 # pirs
 
+Product entry points:
+
+- **`pirs`** — full harness (REPL/TUI/strategies/registry/bench)
+- **`pirs-work`** — coding agent (Claude/Codex/Qoder/Kimi-class); see [docs/pirs-work.md](docs/pirs-work.md)
+- **`pirs-claw`** — lean personal assistant (vs OpenClaw/Hermes); see [docs/pirs-claw.md](docs/pirs-claw.md)
+- Shrimp lessons: [docs/shrimp-transfer.md](docs/shrimp-transfer.md)
+
 A Rust port of the [pi agent harness](https://github.com/earendil-works/pi): an OpenAI-compatible coding agent with a streaming agent loop, built-in coding tools, [rhai](https://rhai.rs)-script extensibility, a headless RPC mode, and a multi-instance orchestrator.
 
 Status: **alpha**. The core is ported and tested (150+ tests); Google provider and sandboxing are not yet ported.
