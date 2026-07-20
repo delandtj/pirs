@@ -93,6 +93,16 @@ pub fn set_session_meta(session_id: &str, model: &str) {
     *SESSION_META.write().unwrap() = (session_id.to_string(), model.to_string());
 }
 
+/// Current session id for host code (strategy phases, telemetry).
+pub fn current_session_id() -> String {
+    SESSION_META.read().unwrap().0.clone()
+}
+
+/// Current agent model string for host code.
+pub fn current_agent_model() -> String {
+    SESSION_META.read().unwrap().1.clone()
+}
+
 /// Query functions contributed by the embedding application (e.g. the CLI
 /// exposes the code graph). Each becomes a rhai fn `name(path) -> [String]`.
 /// Register before loading extensions.
@@ -1312,6 +1322,7 @@ fn event_to_rhai(event: &pirs_agent::AgentEvent) -> (String, Dynamic) {
             tool_results,
         } => {
             map.insert("text".into(), message.text().into());
+            map.insert("model".into(), message.model.clone().into());
             map.insert(
                 "stopReason".into(),
                 format!("{:?}", message.stop_reason).into(),

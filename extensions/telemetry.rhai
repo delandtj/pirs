@@ -7,9 +7,10 @@
 // deliberately never the content-bearing fields `on_event` also carries
 // (assistant `text`, tool `args`, `errorMessage`). That's enforced by
 // construction here (each record below is a hand-picked field list, not a
-// pass-through of the event map), the closest rhai gets to Grok Build's
-// `#[serde(skip)]`-at-the-type-level guarantee that a sensitive field can
-// never reach the sink no matter what future code touches this file.
+// pass-through of the event map).
+//
+// Prefer CLI `--trace` for a full flight recorder (agent events + strategy
+// phases). This pack is the lightweight, content-free always-on option.
 //
 // This is deliberately a different, narrower thing than `audit-log.rhai`,
 // which exists precisely to capture full tool args/results for local
@@ -24,11 +25,17 @@ fn telemetry_path() {
 
 fn write_record(fields) {
     fields.ts = now_millis();
+    // Host-provided session identity (see pirs_rhai::set_session_meta).
+    fields.sessionId = session_id();
+    // Active model (updated per strategy phase when plan-model is used).
+    fields.model = agent_model();
     fs_append(telemetry_path(), fields.to_json() + "\n");
 }
 
 fn on_event(ty, data) {
     if ty == "turn_end" {
+        // `model` is filled by the host on turn_end (AssistantMessage.model);
+        // session-level agent_model() is also stamped in write_record.
         write_record(#{
             kind: "turn",
             stopReason: data.stopReason,
@@ -36,6 +43,7 @@ fn on_event(ty, data) {
             inputTokens: data.inputTokens,
             cacheReadTokens: data.cacheReadTokens,
             outputTokens: data.outputTokens,
+            turnModel: data.model,
         });
     } else if ty == "tool_execution_end" {
         write_record(#{

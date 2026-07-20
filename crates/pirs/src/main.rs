@@ -23,6 +23,7 @@ mod session;
 mod subagent;
 mod system_prompt;
 mod tui;
+mod observability;
 mod registry;
 mod weak_compose;
 
@@ -192,6 +193,12 @@ struct Cli {
     #[arg(long)]
     cascade: Option<String>,
 
+    /// JSONL flight recorder for this run (agent events + strategy phases).
+    /// Omit PATH to write `~/.pirs/traces/<session>-<ts>-<pid>.jsonl`.
+    /// Same schema as `pirs-bench --trace` (jq-friendly, crash-safe).
+    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "AUTO")]
+    trace: Option<String>,
+
     /// Max agent turns (exit code 53 when hit)
     #[arg(long)]
     max_turns: Option<usize>,
@@ -321,10 +328,16 @@ fn print_usage(report: &pirs_agent::usage::UsageReport) {
         total.reasoning,
         total.total_tokens,
     );
+    // Per-model lines make strong-plan / weak-exec splits visible at a glance.
     for (model, u) in &report.by_model {
+        let calls = report.calls.iter().filter(|c| c.model == *model).count();
         eprintln!(
-            "  {model}: input {} (cached {}) output {} total {}",
-            u.input, u.cache_read, u.output, u.total_tokens
+            "  {model} ({calls} call{}): input {} (cached {}) output {} total {}",
+            if calls == 1 { "" } else { "s" },
+            u.input,
+            u.cache_read,
+            u.output,
+            u.total_tokens
         );
     }
 }
@@ -1245,13 +1258,40 @@ async fn main() -> anyhow::Result<()> {
     let approval_shared = gate.shared_mode();
 
     let session_path = session::session_path(&cwd)?;
-    pirs_rhai::set_session_meta(
-        &session_path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string()),
-        &cli.model,
-    );
+    let session_stem = session_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    pirs_rhai::set_session_meta(&session_stem, &cli.model);
+
+    // Optional flight recorder: agent events + strategy phase boundaries.
+    let run_id = observability::make_run_id(&session_stem);
+    let trace_path = observability::resolve_trace_path(cli.trace.as_deref(), &run_id);
+    let trace_phase: Arc<Mutex<String>> = Arc::new(Mutex::new("main".into()));
+    let recorder: Option<Arc<pirs_agent::trace::Recorder>> = match &trace_path {
+        Some(path) => {
+            let rec = observability::open_recorder(path, &run_id)?;
+            let aliases: Vec<String> = model_registry
+                .models
+                .iter()
+                .map(|m| m.alias.clone())
+                .collect();
+            observability::record_run_config(
+                &rec,
+                &cli.model,
+                cli.plan_model.as_deref(),
+                cli.strategy.as_deref().or(cli.profile.as_deref()),
+                &aliases,
+            );
+            observability::attach_agent_trace(
+                &mut agent,
+                Arc::clone(&rec),
+                Arc::clone(&trace_phase),
+            );
+            Some(rec)
+        }
+        None => None,
+    };
     if let Err(e) = pirs_agent::memory::init_global(&cwd.join(".pirs").join("memory.db")) {
         eprintln!("[memory disabled: {e}]");
     } else {
@@ -1378,6 +1418,8 @@ async fn main() -> anyhow::Result<()> {
                 &cwd,
                 cli.verify.as_deref(),
                 cli.max_attempts,
+                recorder.as_ref(),
+                Some(Arc::clone(&trace_phase)),
             )
             .await?;
             eprintln!();
@@ -1512,6 +1554,8 @@ async fn run_strategy_turn(
     cwd: &Path,
     verify: Option<&str>,
     max_attempts: Option<u32>,
+    recorder: Option<&Arc<pirs_agent::trace::Recorder>>,
+    trace_phase: Option<Arc<Mutex<String>>>,
 ) -> anyhow::Result<(pirs_agent::usage::UsageReport, bool)> {
     use pirs_agent::gate::{run_gated, GateOutcome};
     use pirs_agent::phase_agent::AgentPhaseDriver;
@@ -1570,10 +1614,14 @@ async fn run_strategy_turn(
     let policy_ref = &policy;
     let tools_ref = &full_tools;
     let model_ref = default_model.as_str();
+    let rec_owned = recorder.cloned();
+    let phase_slot = trace_phase.unwrap_or_else(|| Arc::new(Mutex::new("main".into())));
 
     // One strategy attempt: a fresh driver seeded with the prior failure verdict.
     let attempt = |verdict: Option<String>| {
         let all_messages = Rc::clone(&all_messages);
+        let rec = rec_owned.clone();
+        let phase_slot = Arc::clone(&phase_slot);
         async move {
             let mut driver = AgentPhaseDriver::new(|req: &PhaseReq| {
                 // Profile tool policy first (a role can forbid tools entirely),
@@ -1597,6 +1645,14 @@ async fn run_strategy_turn(
                         "full"
                     },
                 );
+                if let Ok(mut p) = phase_slot.lock() {
+                    *p = req.phase_id.clone();
+                }
+                if let Some(rec) = &rec {
+                    observability::record_phase_start(rec, req);
+                }
+                // Per-phase model so telemetry packs / session_meta see the active one.
+                pirs_rhai::set_session_meta(&pirs_rhai::current_session_id(), &model);
                 base.fork_for_phase(req.system.clone(), model, scoped)
             });
             let task = Task {
@@ -1604,11 +1660,17 @@ async fn run_strategy_turn(
                 targets: Vec::new(),
                 verdict,
             };
-            let r = run_strategy_async(strategy_ref, &mut driver, &task).await;
+            let result = run_strategy_async(strategy_ref, &mut driver, &task).await;
+            if let Some(rec) = &rec {
+                rec.event(
+                    "strategy.attempt_end",
+                    serde_json::json!({ "ok": result.is_ok() }),
+                );
+            }
             all_messages
                 .borrow_mut()
                 .extend(driver.messages().iter().cloned());
-            r
+            result
         }
     };
 

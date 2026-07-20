@@ -138,7 +138,7 @@ Two packs were retired here. `checkpoint.rhai` (singular): despite the name, it 
 | `blame.rhai` | Line-level provenance: attribute each changed line to its turn. |
 | `audit-log.rhai` | Append every tool call and result (full content) to `~/.pirs/audit.jsonl`. |
 | `runs.rhai` | Durable run records: each run appends to `~/.pirs/runs/<ts>.jsonl`. |
-| `telemetry.rhai` | Metadata-only usage stats (counts, tokens, stop reasons) to `~/.pirs/telemetry.jsonl` — never prompt/tool content. |
+| `telemetry.rhai` | Metadata-only usage stats (counts, tokens, stop reasons, session id, model) to `~/.pirs/telemetry.jsonl` — never prompt/tool content. For full event traces use CLI `--trace`. |
 
 ## Authoring & misc
 

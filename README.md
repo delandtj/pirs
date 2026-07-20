@@ -8,7 +8,7 @@ Providers: **OpenAI-compatible** (`--provider openai`, `OPENAI_API_KEY`, `OPENAI
 
 UI: `--mode tui` (ratatui: streaming conversation, status line with model/approval/usage, steer-by-typing, inline approvals, PgUp/PgDn scroll) alongside the plain REPL (default), `--mode rpc` (headless JSONL), and `--mode acp` (Agent Client Protocol, for editors that embed agents directly).
 
-Runtime features: auto-compaction with `/compact`, approval modes (`--approval auto|ask|yolo`, `/approval`), background jobs (`bash`/`delegate` with `background: true`, managed via `jobs`/`job_output`/`job_kill`/`job_steer`), goal support (`goal.rhai` pack), multi-model delegation (`delegate` with `model` override), token+cache accounting (`/usage`).
+Runtime features: auto-compaction with `/compact`, approval modes (`--approval auto|ask|yolo`, `/approval`), background jobs (`bash`/`delegate` with `background: true`, managed via `jobs`/`job_output`/`job_kill`/`job_steer`), goal support (`goal.rhai` pack), multi-model delegation (`delegate` with `model` override), token+cache accounting (`/usage`), flight recorder (`--trace` / `--trace=PATH` → JSONL under `~/.pirs/traces/` with agent events + strategy phase boundaries; same schema as `pirs-bench --trace`).
 
 ## Quickstart
 
