@@ -15,12 +15,18 @@ use pirs_claw::presets::{
     resolve_code_strategy, CodeOptions, DEFAULT_MODEL, DEFAULT_PLAN_MODEL, DEFAULT_STRATEGY,
 };
 use pirs_claw::registry;
-use pirs_claw::skills::{default_skills_dir, find_skill, install_skill, load_skills, skills_prompt_section, usage_counts};
+use pirs_claw::learn;
+use pirs_claw::life_tools;
+use pirs_claw::skill_tools;
+use pirs_claw::skills::{
+    default_skills_dir, find_skill, install_skill, install_skill_url, load_skills, remove_skill,
+    skills_full_section, skills_prompt_section, usage_counts, validate_skill, Skill,
+};
 use pirs_claw::parse_duration_secs;
 use pirs_claw::{
     apply_exec_backend, claw_system_prompt, default_state_dir, describe_exec_backend,
-    extract_assistant_reply, load_secrets_env, require_llm_key,
-    should_mark_schedule_fired, DeliverTarget, ScheduleStore, SessionId, SessionStore,
+    extract_assistant_reply, load_secrets_env, require_llm_key, should_mark_schedule_fired,
+    DeliverTarget, ScheduleStore, SessionId, SessionStore,
 };
 
 #[derive(Parser, Debug)]
@@ -74,6 +80,14 @@ struct Cli {
     /// Allow coding tools on gateway messages (default: chat-only tools off for safety).
     #[arg(long, global = true)]
     gateway_code: bool,
+
+    /// Enable skill crystallize after substantial code/chat turns (default on for CLI).
+    #[arg(long, global = true, default_value_t = true)]
+    learn: bool,
+
+    /// Disable learning loop for this invocation.
+    #[arg(long, global = true, default_value_t = false)]
+    no_learn: bool,
 
     #[command(subcommand)]
     cmd: Option<Commands>,
@@ -141,6 +155,15 @@ enum SkillsCmd {
     Show { name: String },
     /// Install a skill file or directory into ~/.pirs/skills.
     Add { path: PathBuf },
+    /// Install SKILL.md from an HTTP(S) URL (agentskills.io layout).
+    Install { url: String },
+    /// Validate skill name/description (agentskills.io rules).
+    Validate {
+        /// Path to SKILL.md or skill directory, or installed skill name.
+        target: String,
+    },
+    /// Remove an installed skill by name.
+    Remove { name: String },
     /// Show skill usage counts.
     Usage,
 }
@@ -157,8 +180,22 @@ enum ScheduleCmd {
         every_dur: String,
         #[arg(long, default_value = "cli")]
         deliver: String,
+        /// Optional job name (for pause/resume/remove by name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Attach skill(s) by name (repeatable); full body injected on fire.
+        #[arg(long = "skill")]
+        skills: Vec<String>,
+        /// Optional model pin for this job.
+        #[arg(long)]
+        model: Option<String>,
     },
     List,
+    Pause { id: String },
+    Resume { id: String },
+    Remove { id: String },
+    /// Fire one job immediately (does not wait for next_fire).
+    Run { id: String },
     Tick {
         #[arg(long)]
         run: bool,
@@ -270,6 +307,7 @@ async fn main() -> anyhow::Result<()> {
                 max_turns,
                 sequential,
                 &skills,
+                cli.learn && !cli.no_learn && learn::learn_enabled_cli(),
             )
             .await?;
         }
@@ -278,7 +316,15 @@ async fn main() -> anyhow::Result<()> {
             if text.is_empty() {
                 anyhow::bail!("usage: pirs-claw chat <message>");
             }
-            run_chat(&state, &cli.model, &cwd, &text, &skills).await?;
+            run_chat(
+                &state,
+                &cli.model,
+                &cwd,
+                &text,
+                &skills,
+                cli.learn && !cli.no_learn && learn::learn_enabled_cli(),
+            )
+            .await?;
         }
         Some(Commands::History { last }) => {
             let store = SessionStore::open_for(&state, SessionId::cli_local())?;
@@ -312,17 +358,46 @@ async fn main() -> anyhow::Result<()> {
                         println!("{} — {} ({})", s.name, s.description, s.path.display());
                     }
                 }
-                SkillsCmd::Show { name } => {
-                    match find_skill(&skills, &name) {
-                        Some(s) => {
-                            println!("# {}\n{}\n\n{}", s.name, s.description, s.body);
-                        }
-                        None => anyhow::bail!("unknown skill {name:?}"),
+                SkillsCmd::Show { name } => match find_skill(&skills, &name) {
+                    Some(s) => {
+                        println!("# {}\n{}\n\n{}", s.name, s.description, s.body);
                     }
-                }
+                    None => anyhow::bail!("unknown skill {name:?}"),
+                },
                 SkillsCmd::Add { path } => {
                     let dest = install_skill(&path, &default_skills_dir())?;
                     println!("installed → {}", dest.display());
+                }
+                SkillsCmd::Install { url } => {
+                    let dest = install_skill_url(&url, &default_skills_dir())?;
+                    println!("installed from URL → {}", dest.display());
+                }
+                SkillsCmd::Validate { target } => {
+                    let path = PathBuf::from(&target);
+                    let sk = if path.exists() {
+                        let skill_md = if path.is_dir() {
+                            path.join("SKILL.md")
+                        } else {
+                            path
+                        };
+                        let raw = std::fs::read_to_string(&skill_md)?;
+                        pirs_claw::skills::parse_skill_md(&raw, &skill_md)
+                    } else if let Some(s) = find_skill(&skills, &target) {
+                        s.clone()
+                    } else {
+                        anyhow::bail!("skill not found: {target}");
+                    };
+                    match validate_skill(&sk) {
+                        Ok(()) => println!("ok: {} — {}", sk.name, sk.description),
+                        Err(e) => anyhow::bail!("invalid: {e}"),
+                    }
+                }
+                SkillsCmd::Remove { name } => {
+                    if remove_skill(&name, &default_skills_dir())? {
+                        println!("removed {name}");
+                    } else {
+                        println!("not found: {name}");
+                    }
                 }
                 SkillsCmd::Usage => {
                     let u = usage_counts();
@@ -359,31 +434,83 @@ async fn main() -> anyhow::Result<()> {
                     in_dur,
                     every_dur,
                     deliver,
+                    name,
+                    skills: job_skills,
+                    model,
                 } => {
                     let p = prompt.join(" ");
                     let in_secs = parse_duration_secs(&in_dur)?;
                     let every = parse_duration_secs(&every_dur)?;
                     let deliver = DeliverTarget::parse(&deliver);
-                    let e = store.add_with_deliver(&p, every, in_secs, deliver)?;
+                    let e = store.add_full(
+                        &p,
+                        every,
+                        in_secs,
+                        deliver,
+                        name,
+                        job_skills,
+                        model,
+                    )?;
                     println!(
-                        "scheduled {} next_fire={} every_secs={} deliver={}",
+                        "scheduled {} name={:?} next_fire={} every_secs={} deliver={} skills={:?}",
                         e.id,
+                        e.name,
                         e.next_fire,
                         e.every_secs,
-                        e.deliver.as_config_str()
+                        e.deliver.as_config_str(),
+                        e.skills
                     );
                 }
                 ScheduleCmd::List => {
                     for j in store.list()? {
                         println!(
-                            "{} enabled={} next={} every={} deliver={} | {}",
+                            "{} name={:?} enabled={} next={} every={} deliver={} skills={:?} | {}",
                             j.id,
+                            j.name,
                             j.enabled,
                             j.next_fire,
                             j.every_secs,
                             j.deliver.as_config_str(),
+                            j.skills,
                             j.prompt
                         );
+                    }
+                }
+                ScheduleCmd::Pause { id } => {
+                    if store.set_enabled(&id, false)? {
+                        println!("paused {id}");
+                    } else {
+                        anyhow::bail!("job not found: {id}");
+                    }
+                }
+                ScheduleCmd::Resume { id } => {
+                    if store.set_enabled(&id, true)? {
+                        println!("resumed {id}");
+                    } else {
+                        anyhow::bail!("job not found: {id}");
+                    }
+                }
+                ScheduleCmd::Remove { id } => {
+                    if store.remove(&id)? {
+                        println!("removed {id}");
+                    } else {
+                        anyhow::bail!("job not found: {id}");
+                    }
+                }
+                ScheduleCmd::Run { id } => {
+                    let job = store
+                        .find(&id)?
+                        .ok_or_else(|| anyhow::anyhow!("job not found: {id}"))?;
+                    let fire_ok = fire_schedule_job(&job, &state, &cli.model, &skills).await?;
+                    if fire_ok {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        store.mark_fired(&job.id, now)?;
+                        println!("ran {} ok", job.id);
+                    } else {
+                        anyhow::bail!("job {} failed", job.id);
                     }
                 }
                 ScheduleCmd::Tick { run } => {
@@ -405,40 +532,7 @@ async fn main() -> anyhow::Result<()> {
                             j.prompt
                         );
                         let fire_ok = if run {
-                            // Run chat in-process path via subprocess; capture stdout as reply.
-                            let out = std::process::Command::new(std::env::current_exe()?)
-                                .arg("--model")
-                                .arg(&cli.model)
-                                .arg("--state-dir")
-                                .arg(&state)
-                                .arg("chat")
-                                .arg(&j.prompt)
-                                .output()?;
-                            if !out.status.success() {
-                                eprintln!(
-                                    "[tick] job {} chat failed: {}",
-                                    j.id,
-                                    String::from_utf8_lossy(&out.stderr)
-                                );
-                                false
-                            } else {
-                                // Child stdout is *captured* (not inherited), so the reply is
-                                // never visible unless we re-surface it. Always deliver —
-                                // including DeliverTarget::Cli which println!'s the text.
-                                let reply = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                                if let Err(e) =
-                                    pirs_claw::gateway::deliver_outbound(&j.deliver, &reply).await
-                                {
-                                    eprintln!(
-                                        "[tick] job {} deliver {} failed: {e}",
-                                        j.id,
-                                        j.deliver.as_config_str()
-                                    );
-                                    false
-                                } else {
-                                    true
-                                }
-                            }
+                            fire_schedule_job(&j, &state, &cli.model, &skills).await?
                         } else {
                             false
                         };
@@ -463,6 +557,7 @@ async fn main() -> anyhow::Result<()> {
                 print_usage();
                 std::process::exit(2);
             }
+            let do_learn = cli.learn && !cli.no_learn && learn::learn_enabled_cli();
             if cli.cwd.is_some() || looks_like_repo(&cwd) {
                 run_code(
                     &cwd,
@@ -473,22 +568,90 @@ async fn main() -> anyhow::Result<()> {
                     max_turns,
                     sequential,
                     &skills,
+                    do_learn,
                 )
                 .await?;
             } else {
-                run_chat(&state, &cli.model, &cwd, &text, &skills).await?;
+                run_chat(&state, &cli.model, &cwd, &text, &skills, do_learn).await?;
             }
         }
     }
     Ok(())
 }
 
-fn load_all_skills(extra: Option<&Path>) -> Vec<pirs_claw::Skill> {
+fn load_all_skills(extra: Option<&Path>) -> Vec<Skill> {
     let mut skills = load_skills(&default_skills_dir());
     if let Some(d) = extra {
         skills.extend(load_skills(d));
     }
     skills
+}
+
+/// Chat-safe tool set: recall + progressive skills + life tools (+ optional code tools).
+fn chat_safe_tools(
+    cwd: &Path,
+    skills: &[Skill],
+    allow_code: bool,
+    allow_skill_manage: bool,
+) -> Vec<Arc<dyn pirs_agent::AgentTool>> {
+    let skills_arc = Arc::new(skills.to_vec());
+    let mut tools: Vec<Arc<dyn pirs_agent::AgentTool>> =
+        vec![Arc::new(pirs_tools::RecallTool::default())];
+    tools.extend(skill_tools::skill_tools(skills_arc, allow_skill_manage));
+    tools.extend(life_tools::life_tools(false));
+    if allow_code {
+        tools.extend(coding_tools(cwd));
+    }
+    tools
+}
+
+async fn fire_schedule_job(
+    job: &pirs_claw::ScheduleEntry,
+    state: &Path,
+    default_model: &str,
+    all_skills: &[Skill],
+) -> anyhow::Result<bool> {
+    let model = job.model.as_deref().unwrap_or(default_model);
+    let attached = pirs_claw::skills::select_skills(all_skills, &job.skills);
+    let prompt = if attached.is_empty() {
+        job.prompt.clone()
+    } else {
+        format!(
+            "{}\n\n{}",
+            skills_full_section(&attached),
+            job.prompt
+        )
+    };
+    // Isolated job chat: use a temp state subdir so schedule doesn't pollute cli/local.
+    let job_state = state.join("schedule-runs").join(&job.id);
+    std::fs::create_dir_all(&job_state)?;
+    let out = std::process::Command::new(std::env::current_exe()?)
+        .arg("--model")
+        .arg(model)
+        .arg("--state-dir")
+        .arg(&job_state)
+        .arg("--no-learn")
+        .arg("chat")
+        .arg(&prompt)
+        .output()?;
+    if !out.status.success() {
+        eprintln!(
+            "[tick] job {} chat failed: {}",
+            job.id,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return Ok(false);
+    }
+    let reply = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if let Err(e) = pirs_claw::gateway::deliver_outbound(&job.deliver, &reply).await {
+        eprintln!(
+            "[tick] job {} deliver {} failed: {e}",
+            job.id,
+            job.deliver.as_config_str()
+        );
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn walkdir_sessions(root: &Path) -> Vec<String> {
@@ -558,9 +721,13 @@ async fn handle_gateway_message(
     cwd: &Path,
     model: &str,
     inbound: &InboundMessage,
-    skills: &[pirs_claw::Skill],
+    skills: &[Skill],
     allow_code_tools: bool,
 ) -> anyhow::Result<String> {
+    // Gateway: skill writes off unless PIRS_CLAW_SKILL_WRITE=1 explicitly.
+    if std::env::var("PIRS_CLAW_SKILL_WRITE").is_err() {
+        std::env::set_var("PIRS_CLAW_SKILL_WRITE", "0");
+    }
     let sid = SessionId::from_inbound(inbound);
     let store = SessionStore::open_for(state, sid.clone())?;
     store.append("user", &inbound.text)?;
@@ -571,6 +738,7 @@ async fn handle_gateway_message(
     }
     let (provider, key, _) = registry::resolve_llm(model, 2)?;
     require_llm_key(key.as_deref())?;
+    let key_for_learn = key.clone();
     let completion = pirs_ai::CompletionOptions {
         api_key: key,
         ..Default::default()
@@ -580,13 +748,8 @@ async fn handle_gateway_message(
     if let Some(ref m) = mem {
         sys.push_str(&memory_bridge::recall_context(m, &inbound.text, 5));
     }
-    let tools = if allow_code_tools {
-        coding_tools(cwd)
-    } else {
-        // Chat-safe: no write/edit/bash by default on messaging channels.
-        vec![Arc::new(pirs_tools::RecallTool::default()) as Arc<dyn pirs_agent::AgentTool>]
-    };
-    let mut agent = Agent::new(provider, model)
+    let tools = chat_safe_tools(cwd, skills, allow_code_tools, false);
+    let mut agent = Agent::new(provider.clone(), model)
         .with_system_prompt(sys)
         .with_tools(tools)
         .with_completion(completion);
@@ -603,6 +766,18 @@ async fn handle_gateway_message(
     if let Some(ref m) = mem {
         memory_bridge::remember_turn(m, "assistant", &reply);
     }
+    if learn::learn_enabled_gateway() {
+        learn::maybe_memory_nudge(
+            provider,
+            model,
+            key_for_learn,
+            state,
+            &sid.key(),
+            &inbound.text,
+            &reply,
+        )
+        .await;
+    }
     Ok(reply)
 }
 
@@ -611,11 +786,13 @@ async fn run_chat(
     model: &str,
     cwd: &Path,
     text: &str,
-    skills: &[pirs_claw::Skill],
+    skills: &[Skill],
+    do_learn: bool,
 ) -> anyhow::Result<()> {
     let inbound = InboundMessage::cli(text);
     let (provider, key, _reg) = registry::resolve_llm(model, 2)?;
     require_llm_key(key.as_deref())?;
+    let key_for_learn = key.clone();
 
     let sid = SessionId::cli_local();
     let store = SessionStore::open_for(state, sid.clone())?;
@@ -635,9 +812,16 @@ async fn run_chat(
     if let Some(ref m) = mem {
         sys.push_str(&memory_bridge::recall_context(m, text, 5));
     }
-    let mut agent = Agent::new(provider, model)
+    let mut tools = pirs_tools::default_tools(cwd.to_path_buf());
+    tools.extend(chat_safe_tools(cwd, skills, false, true));
+    // Dedupe by name (default_tools may already include recall).
+    {
+        let mut seen = std::collections::HashSet::new();
+        tools.retain(|t| seen.insert(t.name().to_string()));
+    }
+    let mut agent = Agent::new(provider.clone(), model)
         .with_system_prompt(sys)
-        .with_tools(pirs_tools::default_tools(cwd.to_path_buf()))
+        .with_tools(tools)
         .with_completion(completion);
 
     let prior = store.load()?;
@@ -659,6 +843,27 @@ async fn run_chat(
     if let Some(ref m) = mem {
         memory_bridge::remember_turn(m, "assistant", &reply);
     }
+    if do_learn {
+        learn::maybe_memory_nudge(
+            provider.clone(),
+            model,
+            key_for_learn.clone(),
+            state,
+            &sid.key(),
+            text,
+            &reply,
+        )
+        .await;
+        let transcript = learn::session_transcript(text, &reply, "");
+        let _ = learn::maybe_crystallize_skill(
+            provider,
+            model,
+            key_for_learn,
+            &transcript,
+            800,
+        )
+        .await;
+    }
     CliChannel.deliver(&OutboundReply::to(&inbound, reply))?;
     eprintln!(
         "[pirs-claw chat: session {} exec={}]",
@@ -677,7 +882,8 @@ async fn run_code(
     prompt: &str,
     max_turns: Option<usize>,
     sequential: bool,
-    skills: &[pirs_claw::Skill],
+    skills: &[Skill],
+    do_learn: bool,
 ) -> anyhow::Result<()> {
     let opts = apply_code_defaults(CodeOptions {
         cwd: cwd.to_path_buf(),
@@ -712,20 +918,38 @@ async fn run_code(
         ..Default::default()
     };
     let skill_section = skills_prompt_section(skills);
+    let key_for_learn = completion.api_key.clone();
+    let skills_owned: Vec<Skill> = skills.to_vec();
 
     if strategy.name != "monolithic" && strategy.steps.len() > 1 {
         let opts_c = opts.clone();
         let provider_c = provider.clone();
         let completion_c = completion.clone();
         let skill_section_c = skill_section.clone();
+        let skills_c = skills_owned.clone();
         let mut driver = AgentPhaseDriver::new(move |req: &PhaseReq| {
             let model = req.model.clone().unwrap_or_else(|| opts_c.model.clone());
             let mut tools = coding_tools(&opts_c.cwd);
+            tools.extend(chat_safe_tools(&opts_c.cwd, &skills_c, false, true));
+            {
+                let mut seen = std::collections::HashSet::new();
+                tools.retain(|t| seen.insert(t.name().to_string()));
+            }
             if req.scope == ToolScope::ReadOnly {
                 tools.retain(|t| {
                     matches!(
                         t.name(),
-                        "read" | "grep" | "find" | "ls" | "code_map" | "code_search" | "recall"
+                        "read"
+                            | "grep"
+                            | "find"
+                            | "ls"
+                            | "code_map"
+                            | "code_search"
+                            | "recall"
+                            | "skill_list"
+                            | "skill_view"
+                            | "web_fetch"
+                            | "web_search"
                     )
                 });
             }
@@ -764,6 +988,17 @@ async fn run_code(
         run_strategy_async(&strategy, &mut driver, &task).await?;
         let reply = extract_assistant_reply(driver.messages())
             .unwrap_or_else(|| "(strategy completed; no final assistant text)".into());
+        if do_learn {
+            let transcript = learn::session_transcript(prompt, &reply, "code strategy run");
+            let _ = learn::maybe_crystallize_skill(
+                provider,
+                model,
+                key_for_learn,
+                &transcript,
+                400,
+            )
+            .await;
+        }
         println!("{reply}");
         return Ok(());
     }
@@ -778,13 +1013,29 @@ async fn run_code(
         move || coding_tools(&cwd_for_sub),
     );
     let mut tools = coding_tools(&opts.cwd);
+    tools.extend(chat_safe_tools(&opts.cwd, skills, false, true));
+    {
+        let mut seen = std::collections::HashSet::new();
+        tools.retain(|t| seen.insert(t.name().to_string()));
+    }
     tools.push(sub);
-    let mut agent = build_code_agent(provider, &opts)
+    let mut agent = build_code_agent(provider.clone(), &opts)
         .with_completion(completion)
         .with_system_prompt(sys)
         .with_tools(tools);
     let msgs = agent.prompt(prompt).await?;
     if let Some(reply) = extract_assistant_reply(&msgs) {
+        if do_learn {
+            let transcript = learn::session_transcript(prompt, &reply, "code run");
+            let _ = learn::maybe_crystallize_skill(
+                provider,
+                model,
+                key_for_learn,
+                &transcript,
+                400,
+            )
+            .await;
+        }
         println!("{reply}");
     } else {
         anyhow::bail!("empty assistant reply");

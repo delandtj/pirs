@@ -12,7 +12,7 @@
 //! (or `PIRS_CLAW_BIND=0.0.0.0`) to listen on all interfaces.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -65,7 +65,10 @@ pub fn webhook_socket_addr(port: u16) -> SocketAddr {
         .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], port)))
 }
 
-/// Dispatch a long-running channel loop.
+/// Dispatch one or more long-running channel loops (+ optional in-process cron).
+///
+/// `channels` may be a single name, comma list, or was pre-parsed via
+/// [`crate::parse_channel_list`]. Use `["all"]` is expanded by the caller.
 pub async fn run_gateway(
     channel: &str,
     state_dir: &Path,
@@ -76,17 +79,229 @@ pub async fn run_gateway(
         + Sync
         + 'static,
 ) -> anyhow::Result<()> {
+    let channels = crate::parse_channel_list(channel)?;
+    run_gateway_channels(&channels, state_dir, allowlist, on_message).await
+}
+
+/// Multi-channel gateway: start every listed channel that has credentials;
+/// fail only if zero channels start. Spawns a 60s cron ticker in the background.
+pub async fn run_gateway_channels(
+    channels: &[String],
+    state_dir: &Path,
+    allowlist: &PairingAllowlist,
+    on_message: impl Fn(InboundMessage) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
+        > + Send
+        + Sync
+        + 'static,
+) -> anyhow::Result<()> {
     warn_if_allow_all();
     let on_message: MessageHandler = Arc::new(on_message);
-    match channel {
-        CHANNEL_TELEGRAM => run_telegram(state_dir, allowlist, on_message).await,
-        CHANNEL_DISCORD => run_discord_webhook_mode(allowlist, on_message).await,
-        CHANNEL_SLACK => run_slack_webhook_mode(allowlist, on_message).await,
-        CHANNEL_WHATSAPP => run_whatsapp_webhook_mode(allowlist, on_message).await,
-        CHANNEL_SIGNAL => run_signal_cli(allowlist, on_message).await,
-        other => anyhow::bail!(
-            "unknown channel {other:?}. Supported: telegram, discord, slack, whatsapp, signal"
-        ),
+    require_allowlist(allowlist, "gateway")?;
+
+    // Background cron tick (best-effort; does not own telegram flock).
+    let state_cron = state_dir.to_path_buf();
+    tokio::spawn(async move {
+        cron_ticker_loop(state_cron).await;
+    });
+
+    let mut handles = Vec::new();
+    let mut errors = Vec::new();
+
+    for ch in channels {
+        let allow = allowlist.clone();
+        let state = state_dir.to_path_buf();
+        let on_m = on_message.clone();
+        let ch_name = ch.clone();
+        match ch.as_str() {
+            CHANNEL_TELEGRAM => {
+                if telegram_token_present() {
+                    handles.push(tokio::spawn(async move {
+                        if let Err(e) = run_telegram(&state, &allow, on_m).await {
+                            eprintln!("[gateway] telegram exited: {e}");
+                        }
+                    }));
+                } else {
+                    errors.push("telegram: TELEGRAM_BOT_TOKEN not set".into());
+                }
+            }
+            CHANNEL_DISCORD => {
+                if std::env::var("DISCORD_BOT_TOKEN").is_ok()
+                    || std::env::var("PIRS_DISCORD_BOT_TOKEN").is_ok()
+                {
+                    handles.push(tokio::spawn(async move {
+                        if let Err(e) = run_discord_webhook_mode(&allow, on_m).await {
+                            eprintln!("[gateway] discord exited: {e}");
+                        }
+                    }));
+                } else {
+                    errors.push("discord: DISCORD_BOT_TOKEN not set".into());
+                }
+            }
+            CHANNEL_SLACK => {
+                if std::env::var("SLACK_BOT_TOKEN").is_ok()
+                    || std::env::var("PIRS_SLACK_BOT_TOKEN").is_ok()
+                {
+                    handles.push(tokio::spawn(async move {
+                        if let Err(e) = run_slack_webhook_mode(&allow, on_m).await {
+                            eprintln!("[gateway] slack exited: {e}");
+                        }
+                    }));
+                } else {
+                    errors.push("slack: SLACK_BOT_TOKEN not set".into());
+                }
+            }
+            CHANNEL_WHATSAPP => {
+                if std::env::var("WHATSAPP_TOKEN").is_ok()
+                    || std::env::var("PIRS_WHATSAPP_TOKEN").is_ok()
+                {
+                    handles.push(tokio::spawn(async move {
+                        if let Err(e) = run_whatsapp_webhook_mode(&allow, on_m).await {
+                            eprintln!("[gateway] whatsapp exited: {e}");
+                        }
+                    }));
+                } else {
+                    errors.push("whatsapp: WHATSAPP_TOKEN not set".into());
+                }
+            }
+            CHANNEL_SIGNAL => {
+                if std::env::var("SIGNAL_ACCOUNT").is_ok()
+                    || std::env::var("PIRS_SIGNAL_ACCOUNT").is_ok()
+                {
+                    handles.push(tokio::spawn(async move {
+                        if let Err(e) = run_signal_cli(&allow, on_m).await {
+                            eprintln!("[gateway] signal exited: {e}");
+                        }
+                    }));
+                } else {
+                    errors.push("signal: SIGNAL_ACCOUNT not set".into());
+                }
+            }
+            other => errors.push(format!("unknown channel {other}")),
+        }
+        let _ = ch_name;
+    }
+
+    if handles.is_empty() {
+        anyhow::bail!(
+            "no gateway channels started.\n{}",
+            errors.join("\n")
+        );
+    }
+    for e in &errors {
+        eprintln!("[gateway] skip: {e}");
+    }
+    eprintln!(
+        "[pirs-claw gateway] running {} channel task(s); cron ticker every 60s",
+        handles.len()
+    );
+
+    // Wait until all channel tasks finish (usually never).
+    for h in handles {
+        let _ = h.await;
+    }
+    Ok(())
+}
+
+fn telegram_token_present() -> bool {
+    std::env::var("TELEGRAM_BOT_TOKEN")
+        .or_else(|_| std::env::var("PIRS_TELEGRAM_BOT_TOKEN"))
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Background schedule runner used by the gateway daemon.
+async fn cron_ticker_loop(state_dir: PathBuf) {
+    let schedule_path = state_dir.join("schedule.json");
+    let mut interval = tokio::time::interval(Duration::from_secs(60));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        // Non-blocking lock so overlapping ticks don't double-fire.
+        let _lock = match crate::instance_lock::try_acquire(&state_dir, "cron") {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let store = match crate::ScheduleStore::open(&schedule_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[cron] open schedule: {e}");
+                continue;
+            }
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let due = match store.due(now) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("[cron] due: {e}");
+                continue;
+            }
+        };
+        if due.is_empty() {
+            continue;
+        }
+        let mut ok_n = 0u32;
+        let mut fail_n = 0u32;
+        for j in due {
+            eprintln!(
+                "[cron] due {} deliver={}: {}",
+                j.id,
+                j.deliver.as_config_str(),
+                j.prompt
+            );
+            let mut cmd = std::process::Command::new(
+                std::env::current_exe().unwrap_or_else(|_| "pirs-claw".into()),
+            );
+            cmd.arg("--state-dir").arg(&state_dir).arg("chat");
+            if let Some(ref m) = j.model {
+                cmd.arg("--model").arg(m);
+            }
+            // Skill names are loaded by child via state; pass prompt only.
+            // Attached skills: prefix into prompt for isolation.
+            let prompt = if j.skills.is_empty() {
+                j.prompt.clone()
+            } else {
+                format!(
+                    "[scheduled job; skills: {}]\n{}",
+                    j.skills.join(", "),
+                    j.prompt
+                )
+            };
+            cmd.arg(&prompt);
+            let fire_ok = match cmd.output() {
+                Ok(out) if out.status.success() => {
+                    let reply = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if let Err(e) = deliver_outbound(&j.deliver, &reply).await {
+                        eprintln!("[cron] deliver {}: {e}", j.id);
+                        false
+                    } else {
+                        true
+                    }
+                }
+                Ok(out) => {
+                    eprintln!(
+                        "[cron] job {} failed: {}",
+                        j.id,
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                    false
+                }
+                Err(e) => {
+                    eprintln!("[cron] spawn {}: {e}", j.id);
+                    false
+                }
+            };
+            if fire_ok {
+                let _ = store.mark_fired(&j.id, now);
+                ok_n += 1;
+            } else {
+                fail_n += 1;
+            }
+        }
+        eprintln!("[cron summary] ok={ok_n} failed={fail_n}");
     }
 }
 
@@ -783,8 +998,9 @@ mod tests {
         // assert on main ensures we always call deliver_outbound for every target.
         let main_src = include_str!("main.rs");
         assert!(
-            main_src.contains("deliver_outbound(&j.deliver"),
-            "tick must call deliver_outbound with the job deliver target"
+            main_src.contains("deliver_outbound(&job.deliver")
+                || main_src.contains("deliver_outbound(&j.deliver"),
+            "tick/fire must call deliver_outbound with the job deliver target"
         );
         assert!(
             !main_src.contains("if !matches!(j.deliver, DeliverTarget::Cli)"),

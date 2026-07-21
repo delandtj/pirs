@@ -11,12 +11,15 @@ pub mod duration_parse;
 pub mod exec_env;
 pub mod gateway;
 pub mod instance_lock;
+pub mod learn;
+pub mod life_tools;
 pub mod memory_bridge;
 pub mod pairing;
 pub mod presets;
 pub mod registry;
 pub mod secrets;
 pub mod session;
+pub mod skill_tools;
 pub mod skills;
 pub mod voice;
 
@@ -43,8 +46,9 @@ pub use duration_parse::parse_duration_secs;
 pub use secrets::{load_secrets_env, resolve_provider_and_key};
 pub use session::{migrate_legacy_cli_session, SessionId, SessionLine, SessionMeta, SessionStore};
 pub use skills::{
-    default_skills_dir, find_skill, install_skill, load_skills, skills_prompt_section,
-    usage_counts, Skill,
+    default_skills_dir, find_skill, install_skill, install_skill_url, load_skills, remove_skill,
+    skills_full_section, skills_prompt_section, usage_counts, validate_skill, validate_skill_name,
+    write_skill, Skill,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -94,12 +98,21 @@ impl DeliverTarget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScheduleEntry {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub prompt: String,
     pub next_fire: u64,
     pub every_secs: u64,
     pub enabled: bool,
     #[serde(default)]
     pub deliver: DeliverTarget,
+    /// Skill names to inject full body when the job fires.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -159,6 +172,28 @@ impl ScheduleStore {
         first_fire_in_secs: u64,
         deliver: DeliverTarget,
     ) -> anyhow::Result<ScheduleEntry> {
+        self.add_full(
+            prompt,
+            every_secs,
+            first_fire_in_secs,
+            deliver,
+            None,
+            Vec::new(),
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_full(
+        &self,
+        prompt: &str,
+        every_secs: u64,
+        first_fire_in_secs: u64,
+        deliver: DeliverTarget,
+        name: Option<String>,
+        skills: Vec<String>,
+        model: Option<String>,
+    ) -> anyhow::Result<ScheduleEntry> {
         let mut f = self.read()?;
         let now = now_secs();
         let nanos = SystemTime::now()
@@ -167,15 +202,62 @@ impl ScheduleStore {
             .unwrap_or(0);
         let entry = ScheduleEntry {
             id: format!("job-{}-{}-{}", now, nanos, f.jobs.len()),
+            name,
             prompt: prompt.into(),
             next_fire: now.saturating_add(first_fire_in_secs),
             every_secs,
             enabled: true,
             deliver,
+            skills,
+            model,
+            last_run: None,
         };
         f.jobs.push(entry.clone());
         self.write(&f)?;
         Ok(entry)
+    }
+
+    /// Resolve job by id or case-insensitive name.
+    pub fn find(&self, id_or_name: &str) -> anyhow::Result<Option<ScheduleEntry>> {
+        let f = self.read()?;
+        Ok(f.jobs
+            .into_iter()
+            .find(|j| j.id == id_or_name || j.name.as_deref() == Some(id_or_name)))
+    }
+
+    pub fn set_enabled(&self, id_or_name: &str, enabled: bool) -> anyhow::Result<bool> {
+        let mut f = self.read()?;
+        let mut found = false;
+        for j in &mut f.jobs {
+            if j.id == id_or_name || j.name.as_deref() == Some(id_or_name) {
+                j.enabled = enabled;
+                if enabled {
+                    // Resume: schedule next fire from now if past due.
+                    let now = now_secs();
+                    if j.next_fire < now {
+                        j.next_fire = now.saturating_add(j.every_secs.max(1));
+                    }
+                }
+                found = true;
+                break;
+            }
+        }
+        if found {
+            self.write(&f)?;
+        }
+        Ok(found)
+    }
+
+    pub fn remove(&self, id_or_name: &str) -> anyhow::Result<bool> {
+        let mut f = self.read()?;
+        let before = f.jobs.len();
+        f.jobs
+            .retain(|j| j.id != id_or_name && j.name.as_deref() != Some(id_or_name));
+        let removed = f.jobs.len() != before;
+        if removed {
+            self.write(&f)?;
+        }
+        Ok(removed)
     }
 
     pub fn due(&self, now: u64) -> anyhow::Result<Vec<ScheduleEntry>> {
@@ -191,6 +273,7 @@ impl ScheduleStore {
         let mut f = self.read()?;
         for j in &mut f.jobs {
             if j.id == id {
+                j.last_run = Some(now);
                 if j.every_secs == 0 {
                     j.enabled = false;
                 } else {
@@ -201,6 +284,37 @@ impl ScheduleStore {
         self.write(&f)?;
         Ok(())
     }
+}
+
+/// Parse `serve --channel` value: `all`, single name, or comma-separated list.
+pub fn parse_channel_list(s: &str) -> anyhow::Result<Vec<String>> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("empty channel list");
+    }
+    if s.eq_ignore_ascii_case("all") {
+        return Ok(GATEWAY_CHANNELS.iter().map(|c| (*c).to_string()).collect());
+    }
+    let mut out = Vec::new();
+    for part in s.split(',') {
+        let p = part.trim().to_ascii_lowercase();
+        if p.is_empty() {
+            continue;
+        }
+        if !GATEWAY_CHANNELS.iter().any(|c| *c == p) {
+            anyhow::bail!(
+                "unknown channel {p:?}. Supported: {} (or all)",
+                GATEWAY_CHANNELS.join(", ")
+            );
+        }
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    if out.is_empty() {
+        anyhow::bail!("empty channel list");
+    }
+    Ok(out)
 }
 
 pub fn default_state_dir() -> PathBuf {
@@ -330,5 +444,39 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(extract_assistant_reply(&[ok]).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn schedule_pause_resume_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ScheduleStore::open(dir.path().join("schedule.json")).unwrap();
+        let job = store
+            .add_full(
+                "pulse",
+                60,
+                0,
+                DeliverTarget::Cli,
+                Some("morning".into()),
+                vec!["skill-a".into()],
+                None,
+            )
+            .unwrap();
+        assert!(store.set_enabled("morning", false).unwrap());
+        let now = now_secs() + 10;
+        assert!(store.due(now).unwrap().is_empty());
+        assert!(store.set_enabled(&job.id, true).unwrap());
+        assert!(store.remove("morning").unwrap());
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_channel_list_all_and_csv() {
+        let all = parse_channel_list("all").unwrap();
+        assert!(all.contains(&"telegram".into()));
+        assert_eq!(
+            parse_channel_list("telegram,whatsapp").unwrap(),
+            vec!["telegram".to_string(), "whatsapp".to_string()]
+        );
+        assert!(parse_channel_list("irc").is_err());
     }
 }

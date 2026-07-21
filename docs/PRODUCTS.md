@@ -60,22 +60,24 @@ pirs-claw -C ~/repo "fix the failing test"
 pirs-claw --exec docker code "run tests in container"
 pirs-claw --exec ssh:user@host code "…"
 
-# Agent — chat + memory + skills
+# Agent — chat + memory + skills (agentskills.io progressive)
 pirs-claw chat "remind me standup is at 10"
 pirs-claw recall "standup"
 pirs-claw skills list
 pirs-claw skills show my-skill
 pirs-claw skills add ./my-skill/
+pirs-claw skills install https://example.com/SKILL.md
 pirs-claw sessions
 
-# Agent — schedule (durations: 30s / 5m / 2h / 1d)
-pirs-claw schedule add --in 1h --every 1d "morning pulse"
-pirs-claw schedule tick --run   # prints [tick summary] ok=… failed=…
+# Agent — schedule (durations; pause/resume; skill attach)
+pirs-claw schedule add --in 1h --every 1d --name pulse --skill my-skill "morning"
+pirs-claw schedule pause pulse
+pirs-claw schedule tick --run
 
-# Agent — gateway
-echo "$CHAT_ID" | xargs pirs-claw pair add
-# secrets: ~/.pirs/secrets.env (TELEGRAM_BOT_TOKEN=…)
+# Agent — gateway (multi-channel + in-process cron every 60s)
+pirs-claw pair add "$CHAT_ID"
 pirs-claw serve --channel telegram
+pirs-claw serve --channel all
 # systemd: scripts/pirs-claw-telegram.service
 ```
 

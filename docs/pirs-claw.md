@@ -1,6 +1,6 @@
 # pirs-claw
 
-**Daily agent** over the pirs core: repo work, chat, schedules, and a **multi-channel gateway**.  
+**Daily agent** over the pirs core: repo work, chat, schedules, gateway, skills, and life tools.  
 Equal peer product to the `pirs` harness (see [PRODUCTS.md](PRODUCTS.md)).  
 Hermes gap map: [HERMES-GAPS.md](HERMES-GAPS.md).
 
@@ -8,136 +8,126 @@ Hermes gap map: [HERMES-GAPS.md](HERMES-GAPS.md).
 
 | Mode | Command | Notes |
 |------|---------|--------|
-| **Code** | `pirs-claw -C repo "…"` / `code` | plan-exec + plan-model + delegate |
-| **Chat** | `pirs-claw chat "…"` | durable session + FTS memory |
-| **Schedule** | `schedule add/list/tick` | `--in`/`--every` as `30s`/`5m`/`2h`/`1d`; tick summary |
-| **Gateway** | `serve --channel <name>` | telegram (+ discord/slack/whatsapp/signal stubs) |
-| **Sessions** | `sessions` | multi-key `(channel, peer)` + meta |
-| **Recall / skills** | `recall`, `skills list\|show\|add\|usage` | memory + `~/.pirs/skills` |
+| **Code** | `pirs-claw -C repo "…"` / `code` | plan-exec + progressive skills + life tools |
+| **Chat** | `pirs-claw chat "…"` | multi-key session + FTS memory + learn loop |
+| **Schedule** | `schedule add/list/pause/resume/remove/run/tick` | durations; skill attach; gateway auto-ticks |
+| **Gateway** | `serve --channel telegram\|all\|a,b` | multi-channel + 60s cron ticker |
+| **Sessions** | `sessions` | `(channel, peer)` + meta |
+| **Skills** | `skills list\|show\|add\|install\|validate\|remove\|usage` | [agentskills.io](https://agentskills.io) |
 | **Pair** | `pair list\|add\|remove` | gateway allowlist |
 | **Voice** | `transcribe <file>` | external whisper / custom cmd |
 
+## Skills (agentskills.io)
+
+Layout:
+
+```text
+~/.pirs/skills/<name>/SKILL.md
+~/.pirs/skills/<name>/references/   # optional
+~/.pirs/skills/<name>/scripts/      # optional
+```
+
+Frontmatter: required `name` + `description` (agentskills rules); optional `license`, `compatibility`, `metadata`, `allowed-tools`.
+
+**Progressive disclosure:** the system prompt only gets name + description. Full body via:
+
+- agent tools `skill_list` / `skill_view` (and `skill_manage` on CLI)
+- `pirs-claw skills show NAME`
+
+```bash
+pirs-claw skills add ./my-skill/          # directory with SKILL.md
+pirs-claw skills install https://…/SKILL.md
+pirs-claw skills validate my-skill
+pirs-claw skills remove my-skill
+```
+
+## Learning loop
+
+After chat/code turns (default on for CLI; off on gateway unless `PIRS_CLAW_LEARN=1`):
+
+1. **Memory nudge** — if the user message looks durable, extract ≤3 facts into FTS memory  
+2. **Skill crystallize** — after substantial transcripts, write a new `~/.pirs/skills/<name>/SKILL.md`
+
+```bash
+pirs-claw --no-learn chat "…"     # disable for one run
+export PIRS_CLAW_NO_LEARN=1       # disable globally
+export PIRS_CLAW_LEARN=1          # enable on gateway
+export PIRS_CLAW_SKILL_WRITE=0    # deny skill_manage writes (gateway default)
+```
+
+Harness users can still load `extensions/skill-crystallizer.rhai` on **pirs**.
+
+## Life tools
+
+Built-in (no Rhai pack required):
+
+| Tool | Role |
+|------|------|
+| `web_fetch` | GET public URL → text (HTML stripped, truncated) |
+| `web_search` | DuckDuckGo lite (or `PIRS_CLAW_SEARCH_URL` with `{query}`) |
+| `http_json` | Opt-in via `PIRS_CLAW_HTTP_JSON=1` |
+
+SSRF: localhost / private IPs blocked unless `PIRS_CLAW_ALLOW_PRIVATE_URLS=1`.
+
+Gateway default tools: **recall + skill_list/view + web_fetch/search** (no bash/write).  
+`--gateway-code` adds coding tools.
+
 ## Model registry
 
-Same shape as the harness — **user** `~/.pirs/config.toml` only (no project-trust path):
+User `~/.pirs/config.toml` only (same shape as harness). Keys from secrets.env.
 
-```toml
-[[backends]]
-name = "dashscope"
-kind = "openai_compatible"
-base_url = "https://coding-intl.dashscope.aliyuncs.com/v1"
-api_key_env = "DASHSCOPE_API_KEY"
-
-[[models]]
-alias = "qwen-plus"
-serve = [{ backend = "dashscope", model = "qwen3.5-plus" }]
-```
+## Exec backends
 
 ```bash
-pirs-claw --model qwen-plus chat "hi"
-```
-
-Keys resolve from backend `api_key_env` / secrets.env. Unregistered model names fall back to env-key provider detection.
-
-## Exec backends (Hermes local/Docker/SSH)
-
-```bash
-pirs-claw --exec local code "…"
-pirs-claw --exec docker code "…"
-pirs-claw --exec docker:ubuntu:22.04 code "…"
-pirs-claw --exec docker@running-ctr code "…"
-pirs-claw --exec ssh:user@host code "…"
+pirs-claw --exec local|docker|docker:image|docker@ctr|ssh:user@host code "…"
 ```
 
 **Not supported:** Modal, Daytona, Singularity.
 
 ## Sessions
 
-Each `(channel, peer)` has its own transcript + sidecar meta:
-
 ```text
 ~/.pirs/claw/sessions/{channel}/{peer}.jsonl
-~/.pirs/claw/sessions/{channel}/{peer}.meta.json   # last_active, message_count
+~/.pirs/claw/sessions/{channel}/{peer}.meta.json
 ```
-
-CLI chat uses `cli/local`. Legacy `session.jsonl` is migrated once into
-`sessions/cli/local.jsonl`. List with `pirs-claw sessions`.
 
 ## Schedule
 
 ```bash
-pirs-claw schedule add --in 30s --every 1h "pulse"
-pirs-claw schedule add --in 0 --deliver telegram:CHAT_ID "ping me"
-pirs-claw schedule tick          # dry-run: list due, do not fire
-pirs-claw schedule tick --run    # fire; [tick summary] ok=N failed=M
+pirs-claw schedule add --in 30s --every 1h --name pulse --skill my-skill "…"
+pirs-claw schedule pause pulse
+pirs-claw schedule resume pulse
+pirs-claw schedule remove pulse
+pirs-claw schedule run pulse
+pirs-claw schedule tick --run
 ```
 
-Failed fires stay due for retry. Deliver targets: `cli`, `telegram:<id>`, etc.
+`serve` runs an in-process cron ticker every 60s (flock `locks/cron.lock`).
 
 ## Gateway
 
 ```bash
-# Pairing (required unless PIRS_CLAW_ALLOW_ALL=1 — prints a danger warning)
 pirs-claw pair add YOUR_CHAT_ID
-pirs-claw pair list
-pirs-claw pair remove YOUR_CHAT_ID
-
 export TELEGRAM_BOT_TOKEN=…
 pirs-claw serve --channel telegram
-# acquires flock on ~/.pirs/claw/locks/telegram.lock (single getUpdates instance)
-
-# Optional: allow coding tools from messaging (default off)
+pirs-claw serve --channel all              # every channel with credentials
+pirs-claw serve --channel telegram,whatsapp
 pirs-claw serve --channel telegram --gateway-code
 ```
 
-Production checklist: [telegram-checklist.md](telegram-checklist.md).  
-systemd example: [../scripts/pirs-claw-telegram.service](../scripts/pirs-claw-telegram.service).
+systemd: [../scripts/pirs-claw-telegram.service](../scripts/pirs-claw-telegram.service).  
+Checklist: [telegram-checklist.md](telegram-checklist.md).
 
-Webhook-style channels (discord/slack/whatsapp) listen on **127.0.0.1** by default.  
-Public bind only if you set `PIRS_CLAW_PUBLIC_BIND=1` or `PIRS_CLAW_BIND=0.0.0.0`.
-
-**WhatsApp:** Meta hub challenge uses `WHATSAPP_VERIFY_TOKEN` (or `PIRS_WHATSAPP_VERIFY_TOKEN`) on GET verify.
-
-Other channels: `discord`, `slack`, `whatsapp`, `signal` — stubs for Hermes set; production depth is Telegram-first (Slack/Discord intentionally shallow).
-
-## Skills & memory
-
-```bash
-pirs-claw skills              # list
-pirs-claw skills show NAME
-pirs-claw skills add ./path   # install into ~/.pirs/skills
-pirs-claw skills usage
-pirs-claw recall "keyword"
-```
-
-- Skills: `~/.pirs/skills/**/SKILL.md` (frontmatter `name` / `description`)
-- Memory: `~/.pirs/claw/memory.db` (FTS5)
-- Crystallize skills after coding runs: load `skill-crystallizer.rhai` on **pirs**
-
-## Install
-
-```bash
-# from release bundle
-curl -fsSL …/scripts/install.sh | sh   # installs pirs + pirs-claw + pirs-orchestrator
-
-# from source
-cargo install --path crates/pirs-claw
-```
+Webhooks bind **127.0.0.1** by default (`PIRS_CLAW_PUBLIC_BIND=1` / `PIRS_CLAW_BIND=0.0.0.0` to open).
 
 ## Intentionally not
 
 | Skip | Why |
 |------|-----|
 | Modal / Daytona / Singularity | Explicit exclusion |
-| Desktop Work suite | Different product class |
-| Honcho / full skill self-evolution product | Hermes research moat; partial via packs |
-| OpenClaw-scale channel matrix beyond Hermes set | Five channels + CLI is the Hermes set |
-| Deep Slack / Discord productization | Telegram + WA verify first |
-
-## Interactive harness
-
-```bash
-pirs --mode tui --strategy plan-exec --model qwen3.5-plus --plan-model deepseek-v4-pro
-```
+| Full Hermes Skills Hub / scanners | Local + URL install only |
+| Honcho dialectic / SOUL.md product | Out of scope |
+| 20+ messaging platforms | Hermes set only |
+| Full browser CDP suite | web_fetch/search first |
 
 Keys: `~/.pirs/secrets.env`.

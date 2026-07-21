@@ -412,3 +412,93 @@ fn help_mentions_pair_and_skills() {
     assert!(text.contains("skills"), "help should list skills: {text}");
     assert!(text.contains("sessions"), "help should list sessions: {text}");
 }
+
+#[test]
+fn schedule_pause_and_remove() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().to_str().unwrap();
+    let (c1, o1, e1) = run(&[
+        "--state-dir",
+        state,
+        "schedule",
+        "add",
+        "--in",
+        "0",
+        "--name",
+        "pulse",
+        "do-pulse",
+    ]);
+    assert_eq!(c1, 0, "add: {o1}{e1}");
+    let (c2, o2, e2) = run(&["--state-dir", state, "schedule", "pause", "pulse"]);
+    assert_eq!(c2, 0, "pause: {o2}{e2}");
+    let (c3, o3, e3) = run(&["--state-dir", state, "schedule", "list"]);
+    assert_eq!(c3, 0, "list: {o3}{e3}");
+    assert!(o3.contains("enabled=false"), "paused job: {o3}");
+    let (c4, o4, e4) = run(&["--state-dir", state, "schedule", "remove", "pulse"]);
+    assert_eq!(c4, 0, "remove: {o4}{e4}");
+    let (c5, o5, e5) = run(&["--state-dir", state, "schedule", "list"]);
+    assert_eq!(c5, 0, "{o5}{e5}");
+    assert!(!o5.contains("do-pulse"), "removed: {o5}");
+}
+
+#[test]
+fn skills_validate_rejects_bad_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join(".pirs")).unwrap();
+    let bad = dir.path().join("BadName.md");
+    std::fs::write(
+        &bad,
+        "---\nname: BadName\ndescription: x\n---\nbody\n",
+    )
+    .unwrap();
+    let out = Command::new(claw_bin())
+        .env("HOME", &home)
+        .args(["skills", "validate", bad.to_str().unwrap()])
+        .output()
+        .expect("validate");
+    assert!(
+        !out.status.success(),
+        "bad agentskills name must fail: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn serve_all_fails_without_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join(".pirs")).unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("allowlist.txt"), "peer1\n").unwrap();
+    let out = Command::new(claw_bin())
+        .env("HOME", &home)
+        .env("PIRS_CLAW_ALLOW_ALL", "0")
+        .env_remove("TELEGRAM_BOT_TOKEN")
+        .env_remove("PIRS_TELEGRAM_BOT_TOKEN")
+        .env_remove("DISCORD_BOT_TOKEN")
+        .env_remove("SLACK_BOT_TOKEN")
+        .env_remove("WHATSAPP_TOKEN")
+        .env_remove("PIRS_CLAW_ALLOW_ALL")
+        .args([
+            "--state-dir",
+            state.to_str().unwrap(),
+            "serve",
+            "--channel",
+            "all",
+        ])
+        .output()
+        .expect("serve all");
+    assert!(!out.status.success());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+    .to_lowercase();
+    assert!(
+        text.contains("no gateway") || text.contains("token") || text.contains("telegram"),
+        "expected multi-channel fail: {text}"
+    );
+}
