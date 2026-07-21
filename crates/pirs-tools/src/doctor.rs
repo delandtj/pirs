@@ -114,13 +114,29 @@ pub fn doctor_report(cwd: &Path) -> Vec<String> {
     // Computer use
     let cu = matches!(
         std::env::var("PIRS_COMPUTER_USE").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
+        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
     );
+    let display = std::env::var("DISPLAY").unwrap_or_default();
+    let display_ok = !display.trim().is_empty() && display_reachable(&display);
     lines.push(format!(
-        "computer_use: {} (scrot={} xdotool={})",
-        if cu { "enabled" } else { "off (PIRS_COMPUTER_USE=1)" },
+        "computer_use: {} (scrot={} xdotool={} DISPLAY={}{})",
+        if cu { "enabled" } else { "off (set PIRS_COMPUTER_USE=1)" },
         which("scrot"),
-        which("xdotool")
+        which("xdotool"),
+        if display.is_empty() {
+            "(unset)"
+        } else {
+            display.as_str()
+        },
+        if !cu {
+            ""
+        } else if display_ok {
+            " reachable"
+        } else if display.is_empty() {
+            " — no DISPLAY; use a desktop session or: xvfb-run -a pirs …"
+        } else {
+            " — not reachable (start X / xvfb-run -a pirs …)"
+        }
     ));
 
     // gh
@@ -157,6 +173,22 @@ fn which(bin: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+/// True if `$DISPLAY` socket looks usable (does not require xdotool).
+fn display_reachable(display: &str) -> bool {
+    // :0 → /tmp/.X11-unix/X0 ; :99 → X99
+    let num = display
+        .trim()
+        .trim_start_matches(':')
+        .split(['.', '-'])
+        .next()
+        .unwrap_or("");
+    if num.is_empty() {
+        return false;
+    }
+    let sock = std::path::PathBuf::from(format!("/tmp/.X11-unix/X{num}"));
+    sock.exists()
 }
 
 /// Agent tool: doctor

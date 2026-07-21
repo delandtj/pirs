@@ -29,7 +29,7 @@ Legend: **Spine** = production-usable path · **Stub** = thin · **Skip** = inte
 | Browser navigate / screenshot | **Spine** | `browser_navigate`, `browser_screenshot` (Chromium/HTTP) |
 | Browser **CDP** (Playwright-compatible) | **Spine** | `browser_cdp` via pure-Rust **chromiumoxide** (no Node) |
 | Vision | **Spine** | `vision_describe` (OpenAI-compatible VL) |
-| Computer use | **Spine** (opt-in) | `PIRS_COMPUTER_USE=1` + scrot/xdotool |
+| Computer use | **Spine** (opt-in) | `PIRS_COMPUTER_USE=1` + scrot/xdotool; tools: screenshot/click/type/key/move. Headless: `xvfb-run -a pirs …` |
 | Multi-provider + multi-backend STT/TTS | **Spine** | registry + `pirs-audio` + Groq |
 | Outbound attachments | **Spine** | `attach_file` + Telegram sendDocument |
 | Subagents / multi-model coding | **Spine / moat** | strategies, weak, graph, bench |

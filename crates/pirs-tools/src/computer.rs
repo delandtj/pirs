@@ -29,6 +29,19 @@ fn cu_enabled() -> bool {
     )
 }
 
+/// Fail with a clear fix when CUA is on but there is no usable X display.
+fn require_display() -> anyhow::Result<()> {
+    let d = std::env::var("DISPLAY").unwrap_or_default();
+    if d.trim().is_empty() {
+        anyhow::bail!(
+            "computer use needs a display (DISPLAY is unset). \
+             On a desktop session this is set automatically; on a headless host run: \
+             xvfb-run -a pirs …  (or export DISPLAY=:0 when logged into a GUI)"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Deserialize, JsonSchema)]
 struct ShotArgs {
     /// Output path under cwd (default .pirs/screen.png).
@@ -71,6 +84,7 @@ impl AgentTool for ComputerScreenshotTool {
                 "computer use disabled — set PIRS_COMPUTER_USE=1 to allow desktop control"
             );
         }
+        require_display()?;
         let args: ShotArgs = serde_json::from_value(ctx.args)?;
         let rel = args.path.unwrap_or_else(|| ".pirs/screen.png".into());
         let out = crate::paths::resolve_contained(&self.cwd, &rel)?;
@@ -95,7 +109,10 @@ impl AgentTool for ComputerScreenshotTool {
             anyhow::bail!("no screenshot tool (install scrot, gnome-screenshot, or imagemagick)");
         };
         if !ok || !out.is_file() {
-            anyhow::bail!("screenshot command failed");
+            anyhow::bail!(
+                "screenshot command failed (DISPLAY={} may be unreachable)",
+                std::env::var("DISPLAY").unwrap_or_else(|_| "?".into())
+            );
         }
         Ok(ToolOutput::text(format!(
             "Desktop screenshot saved to {}",
@@ -137,6 +154,7 @@ impl AgentTool for ComputerClickTool {
         if !cu_enabled() {
             anyhow::bail!("computer use disabled — set PIRS_COMPUTER_USE=1");
         }
+        require_display()?;
         let Some(xdotool) = which("xdotool") else {
             anyhow::bail!("xdotool not installed");
         };
@@ -194,6 +212,7 @@ impl AgentTool for ComputerTypeTool {
         if !cu_enabled() {
             anyhow::bail!("computer use disabled — set PIRS_COMPUTER_USE=1");
         }
+        require_display()?;
         let Some(xdotool) = which("xdotool") else {
             anyhow::bail!("xdotool not installed");
         };
@@ -242,6 +261,7 @@ impl AgentTool for ComputerKeyTool {
         if !cu_enabled() {
             anyhow::bail!("computer use disabled — set PIRS_COMPUTER_USE=1");
         }
+        require_display()?;
         let Some(xdotool) = which("xdotool") else {
             anyhow::bail!("xdotool not installed");
         };
@@ -289,6 +309,7 @@ impl AgentTool for ComputerMoveTool {
         if !cu_enabled() {
             anyhow::bail!("computer use disabled — set PIRS_COMPUTER_USE=1");
         }
+        require_display()?;
         let Some(xdotool) = which("xdotool") else {
             anyhow::bail!("xdotool not installed");
         };
