@@ -889,6 +889,8 @@ async fn main() -> anyhow::Result<()> {
     if safety != pirs_tools::SafetyProfile::Default {
         eprintln!("[agent-profile: {}]", safety.name());
     }
+    // So Rhai packs (strict-plan, etc.) can read the active profile via agent_profile("").
+    std::env::set_var("PIRS_AGENT_PROFILE", safety.name());
     // Always install gate when a non-default safety profile is set (hard denials),
     // or when approval is Ask. Auto+default stays open; yolo still skips rhai policy.
     let gate = std::sync::Arc::new(approval::ApprovalGate::with_profile(

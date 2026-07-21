@@ -44,8 +44,11 @@ Source of truth for order: `pirs_rhai::weak_packs::BUNDLED_ORDER` /
 | `sandbox.rhai` / `guardrails.rhai` | OS sandbox / catastrophic command denylist |
 | `project-discipline.rhai` | Steer toward shared `project` tool after repeated shell test/lint |
 | `skill-crystallizer.rhai` | Pack-side skill distill (native path: `pirs-skills::learn`) |
+| `strict-plan.rhai` | **Extra** denials under `--agent-profile plan` (network/browser); never loosens Rust plan |
+| `session-discipline.rhai` | Steer `todo` / `ask_user` usage (tools stay Rust) |
+| `browser-cdp-workflow.rhai` | CDP multi-step recipes / thrash steering (client stays Rust) |
 
-Host APIs (after `register_core_host_apis()`): `project_profile(cwd)`, `project_packages(cwd)`, `skills_index(_)`.
+Host APIs (after `register_core_host_apis()`): `project_profile(cwd)`, `project_packages(cwd)`, `skills_index(_)`, `agent_profile(_)` (active `PIRS_AGENT_PROFILE` name).
 
 ## Composition hazards (last-wins / pin channels)
 
@@ -62,6 +65,8 @@ Host APIs (after `register_core_host_apis()`): `project_profile(cwd)`, `project_
 
 | Extension | What it does |
 |-----------|--------------|
+| **Rust `--agent-profile`** | Hard gate: `plan` / `accept-edits` / `auto-approve` (not a pack; always on when set). |
+| `strict-plan.rhai` | Optional **stricter** plan: blocks web/browser/vision when profile is `plan` (or `PIRS_STRICT_PLAN=1`). |
 | `sandbox.rhai` | Overrides `bash` with an OS-level sandbox (bubblewrap/Seatbelt, falling back to Docker/Podman if bwrap can't start): read-only filesystem outside the working dir, no network by default — or a domain allowlist (`.pirs/sandbox-allowlist.txt`) enforced by a local CONNECT proxy on Docker/Podman. |
 | `guardrails.rhai` | Hard-blocks a fixed list of known-catastrophic patterns (`rm -rf /`, `curl \| bash`, force-push, ...) regardless of location — no ask, just refuses. |
 | `path-guard.rhai` | Blocks otherwise-ordinary commands (`rm`/`chmod`/`chown`/etc, `find -exec`/`-delete`) whose *target resolves outside the working directory* — catches what a fixed pattern list can't (structural, not pattern-based). |

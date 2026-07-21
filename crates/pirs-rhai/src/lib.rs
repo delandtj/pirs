@@ -152,6 +152,15 @@ pub fn register_core_host_apis() {
             .map(|s| format!("{}: {}", s.name, s.description))
             .collect()
     });
+    // Active safety profile (PIRS_AGENT_PROFILE / --agent-profile). Packs may
+    // *add* denials when profile is plan; they must never loosen Rust hard denials.
+    register_query_fn("agent_profile", |_arg| {
+        let name = std::env::var("PIRS_AGENT_PROFILE")
+            .ok()
+            .and_then(|s| pirs_tools::SafetyProfile::parse(&s).map(|p| p.name().to_string()))
+            .unwrap_or_else(|| "default".into());
+        vec![name]
+    });
 }
 
 fn build_engine(state: &StateStore, caps: &caps::Caps) -> Engine {

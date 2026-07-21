@@ -5,6 +5,10 @@
 //! - `plan` — only non-mutating tools
 //! - `accept_edits` — file mutations allowed; shell still subject to approval
 //! - `auto_approve` — all tools allowed (no profile denials)
+//!
+//! **Rhai packs may only ADD denials** (e.g. `extensions/strict-plan.rhai`).
+//! They must never loosen this module’s hard denials. Host query
+//! `agent_profile("")` exposes the active profile name to packs.
 
 use pirs_agent::events::BeforeToolCallHook;
 use std::sync::Arc;
