@@ -941,7 +941,7 @@ async fn main() -> anyhow::Result<()> {
         .as_deref()
         .and_then(pirs_tools::PermissionMode::parse)
         .unwrap_or_else(pirs_tools::PermissionMode::from_env);
-    std::env::set_var("PIRS_PERMISSION_MODE", perm_mode.name());
+    pirs_tools::init_live_permission_mode(perm_mode);
     if perm_mode != pirs_tools::PermissionMode::WorkspaceWrite || dial_plan {
         eprintln!("[permission-mode: {}]", perm_mode.name());
     }
@@ -959,9 +959,10 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    // Chain permission ladder (always on when not danger-full-access).
-    if perm_mode != pirs_tools::PermissionMode::DangerFullAccess {
-        let ph = pirs_tools::permission_hook(perm_mode);
+    // Always install live permission ladder so /plan|/act can tighten mid-session
+    // even if we started on danger-full-access (hook re-reads live mode each call).
+    {
+        let ph = pirs_tools::live_permission_hook();
         gate_hook = pirs_agent::Hooks::chain_before(gate_hook, Some(ph));
     }
     let _ = dial_plan;
@@ -2268,18 +2269,18 @@ async fn handle_command(
         }
         "/plan" | "/act" => {
             let mode = if cmd == "/plan" {
-                "read-only"
+                pirs_tools::PermissionMode::ReadOnly
             } else {
-                "danger-full-access"
+                pirs_tools::PermissionMode::DangerFullAccess
             };
-            std::env::set_var("PIRS_PERMISSION_MODE", mode);
+            pirs_tools::set_live_permission_mode(mode);
             if cmd == "/plan" {
                 std::env::set_var("PIRS_AGENT_PROFILE", "plan");
             }
             println!(
-                "mode → {} (permission={}; new denials apply on next tool call)",
+                "mode → {} (permission={}; denials apply on next tool call)",
                 cmd.trim_start_matches('/'),
-                mode
+                mode.name()
             );
         }
         "/checkpoint" => {
@@ -2310,12 +2311,11 @@ async fn handle_command(
             if arg.is_empty() {
                 println!(
                     "permission-mode: {}",
-                    std::env::var("PIRS_PERMISSION_MODE")
-                        .unwrap_or_else(|_| "workspace-write".into())
+                    pirs_tools::live_permission_mode().name()
                 );
-            } else if pirs_tools::PermissionMode::parse(arg).is_some() {
-                std::env::set_var("PIRS_PERMISSION_MODE", arg);
-                println!("permission-mode → {arg}");
+            } else if let Some(m) = pirs_tools::PermissionMode::parse(arg) {
+                pirs_tools::set_live_permission_mode(m);
+                println!("permission-mode → {}", m.name());
             } else {
                 println!("usage: /permission read-only|workspace-write|danger-full-access");
             }

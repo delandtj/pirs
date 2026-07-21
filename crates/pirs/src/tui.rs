@@ -1648,24 +1648,23 @@ fn handle_slash_command(
             );
         }
         "/plan" => {
-            std::env::set_var("PIRS_PERMISSION_MODE", "read-only");
+            pirs_tools::set_live_permission_mode(pirs_tools::PermissionMode::ReadOnly);
             std::env::set_var("PIRS_AGENT_PROFILE", "plan");
             app.notice("mode → plan (read-only tools; switch with /act)");
         }
         "/act" => {
-            std::env::set_var("PIRS_PERMISSION_MODE", "danger-full-access");
+            pirs_tools::set_live_permission_mode(pirs_tools::PermissionMode::DangerFullAccess);
             app.notice("mode → act (full tools; plan with /plan)");
         }
         "/permission" => {
             if arg.is_empty() {
                 app.notice(format!(
                     "permission: {}",
-                    std::env::var("PIRS_PERMISSION_MODE")
-                        .unwrap_or_else(|_| "workspace-write".into())
+                    pirs_tools::live_permission_mode().name()
                 ));
-            } else if pirs_tools::PermissionMode::parse(arg).is_some() {
-                std::env::set_var("PIRS_PERMISSION_MODE", arg);
-                app.notice(format!("permission → {arg}"));
+            } else if let Some(m) = pirs_tools::PermissionMode::parse(arg) {
+                pirs_tools::set_live_permission_mode(m);
+                app.notice(format!("permission → {}", m.name()));
             } else {
                 app.notice("usage: /permission read-only|workspace-write|danger-full-access");
             }

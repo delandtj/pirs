@@ -423,6 +423,9 @@ pub async fn maybe_crystallize_skill(
 #[cfg(test)]
 mod evolution_mode_tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parse_and_default() {
@@ -434,13 +437,18 @@ mod evolution_mode_tests {
 
     #[test]
     fn record_case_writes_jsonl() {
+        let _g = HOME_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var("HOME").ok();
         std::env::set_var("HOME", dir.path());
         record_evolution_case("hello durable session");
         let p = dir.path().join(".pirs/evolution/cases.jsonl");
         let body = std::fs::read_to_string(p).unwrap();
         assert!(body.contains("preview"));
         assert!(body.contains("hello"));
+        if let Some(h) = prev {
+            std::env::set_var("HOME", h);
+        }
     }
 }
 

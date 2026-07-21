@@ -6,9 +6,10 @@
 //! - `danger-full-access` — no ladder denials (approval may still apply)
 //!
 //! Env: `PIRS_PERMISSION_MODE` / CLI `--permission-mode`.
+//! Mid-session `/plan` `/act` update the live slot via [`set_live_permission_mode`].
 
 use pirs_agent::events::BeforeToolCallHook;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::safety_profile::{is_file_mutation_tool, is_readonly_tool, is_shell_tool};
 
@@ -54,6 +55,27 @@ impl PermissionMode {
     }
 }
 
+fn live_slot() -> &'static Mutex<PermissionMode> {
+    static SLOT: OnceLock<Mutex<PermissionMode>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(PermissionMode::from_env()))
+}
+
+/// Current live permission mode (slash commands update this).
+pub fn live_permission_mode() -> PermissionMode {
+    *live_slot().lock().unwrap()
+}
+
+/// Set live mode and mirror to `PIRS_PERMISSION_MODE` for doctor/status.
+pub fn set_live_permission_mode(mode: PermissionMode) {
+    *live_slot().lock().unwrap() = mode;
+    std::env::set_var("PIRS_PERMISSION_MODE", mode.name());
+}
+
+/// Install initial live mode (startup).
+pub fn init_live_permission_mode(mode: PermissionMode) {
+    set_live_permission_mode(mode);
+}
+
 /// Required mode for a tool name (static classification).
 pub fn required_mode_for_tool(tool: &str) -> PermissionMode {
     if is_readonly_tool(tool)
@@ -96,8 +118,19 @@ pub fn permission_deny_reason(mode: PermissionMode, tool: &str) -> Option<String
     }
 }
 
-pub fn permission_hook(mode: PermissionMode) -> BeforeToolCallHook {
-    Arc::new(move |_id, tool, _args| permission_deny_reason(mode, tool))
+/// Hook that reads the **live** permission mode on every call (plan/act slash works).
+pub fn permission_hook(_initial: PermissionMode) -> BeforeToolCallHook {
+    // Seed live slot if not already set by init.
+    let _ = live_permission_mode();
+    Arc::new(move |_id, tool, _args| {
+        let mode = live_permission_mode();
+        permission_deny_reason(mode, tool)
+    })
+}
+
+/// Explicit live-slot hook (same as [`permission_hook`]).
+pub fn live_permission_hook() -> BeforeToolCallHook {
+    permission_hook(live_permission_mode())
 }
 
 #[cfg(test)]
@@ -142,5 +175,23 @@ mod tests {
             PermissionMode::parse("danger-full-access"),
             Some(PermissionMode::DangerFullAccess)
         );
+    }
+
+    #[test]
+    fn live_mode_change_affects_hook() {
+        init_live_permission_mode(PermissionMode::DangerFullAccess);
+        let h = live_permission_hook();
+        assert!(
+            h("1", "bash", &serde_json::json!({})).is_none(),
+            "full access allows bash"
+        );
+        set_live_permission_mode(PermissionMode::ReadOnly);
+        let deny = h("1", "bash", &serde_json::json!({}));
+        assert!(
+            deny.as_ref().is_some_and(|s| s.contains("read-only")),
+            "after /plan-style switch, bash denied: {deny:?}"
+        );
+        set_live_permission_mode(PermissionMode::DangerFullAccess);
+        assert!(h("1", "bash", &serde_json::json!({})).is_none());
     }
 }

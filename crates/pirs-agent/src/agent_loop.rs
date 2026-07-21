@@ -973,15 +973,48 @@ async fn execute_tool_calls(
             }
         }
     } else {
+        // Parallel path still observes thrash (criterion 2: default execution mode).
         let mut prepared = Vec::new();
+        let mut thrash_blocked = false;
         for (index, call) in calls.into_iter().enumerate() {
             emit(AgentEvent::ToolExecutionStart {
                 tool_call_id: call.id.clone(),
                 tool_name: call.name.clone(),
                 args: call.arguments.clone(),
             });
+            if thrash_blocked {
+                let skipped = error_result_kind(
+                    &call.id,
+                    &call.name,
+                    "Skipped due to thrash stop.",
+                    "skipped_thrash",
+                );
+                emit(AgentEvent::ToolExecutionEnd {
+                    tool_call_id: skipped.tool_call_id.clone(),
+                    tool_name: skipped.tool_name.clone(),
+                    result: Box::new(skipped.clone()),
+                });
+                results[index] = Some(skipped);
+                continue;
+            }
+            if let Some(g) = thrash {
+                if let Some(msg) = g.observe_tool_start(&call.name, &call.arguments) {
+                    let failed = error_result_kind(&call.id, &call.name, &msg, "loop_detect");
+                    emit(AgentEvent::ToolExecutionEnd {
+                        tool_call_id: failed.tool_call_id.clone(),
+                        tool_name: failed.tool_name.clone(),
+                        result: Box::new(failed.clone()),
+                    });
+                    results[index] = Some(failed);
+                    thrash_blocked = true;
+                    continue;
+                }
+            }
             match prepare_call(index, &call, tools, hooks, &visible) {
                 Prepared::Failed { index, result } => {
+                    if let Some(g) = thrash {
+                        let _ = g.observe_tool_end(result.is_error);
+                    }
                     emit(AgentEvent::ToolExecutionEnd {
                         tool_call_id: result.tool_call_id.clone(),
                         tool_name: result.tool_name.clone(),
@@ -1033,6 +1066,9 @@ async fn execute_tool_calls(
         }
         while let Some((index, id, name, outcome)) = in_flight.next().await {
             let result = finalize_result(&id, &name, outcome, hooks);
+            if let Some(g) = thrash {
+                let _ = g.observe_tool_end(result.is_error);
+            }
             emit(AgentEvent::ToolExecutionEnd {
                 tool_call_id: id,
                 tool_name: name,
@@ -1290,5 +1326,48 @@ mod skip_remaining_tests {
         // First two run, third trips loop (max_repeats=3 means trip on 3rd observe)
         assert!(results.iter().any(|r| r.model_text().contains("loop detection") || r.model_text().contains("Skipped")));
         assert!(hits.load(Ordering::SeqCst) <= 3);
+    }
+
+    #[tokio::test]
+    async fn thrash_blocks_identical_parallel_tools() {
+        // Default Agent tool_execution is Parallel — thrash must still arm.
+        let hits = Arc::new(AtomicUsize::new(0));
+        let tools: Vec<Arc<dyn AgentTool>> = vec![Arc::new(CountTool {
+            name: "bash".into(),
+            hits: Arc::clone(&hits),
+        })];
+        let thrash = crate::thrash::ThrashGuard::with_limits(3, 10);
+        let calls: Vec<_> = (0..4)
+            .map(|i| ToolCallData {
+                id: format!("p{i}"),
+                name: "bash".into(),
+                arguments: json!({"command": "ls"}),
+            })
+            .collect();
+        let emit: Emit = Arc::new(|_| {});
+        let results = execute_tool_calls_for_test(
+            calls,
+            &tools,
+            &Hooks::default(),
+            CancellationToken::new(),
+            &emit,
+            false, // parallel
+            Some(&thrash),
+            None,
+        )
+        .await;
+        assert!(
+            results
+                .iter()
+                .any(|r| r.model_text().contains("loop detection")
+                    || r.model_text().contains("thrash")),
+            "parallel path must surface loop detection: {:?}",
+            results.iter().map(|r| r.model_text()).collect::<Vec<_>>()
+        );
+        assert!(
+            thrash.peek_stop().is_some()
+                || results.iter().any(|r| r.model_text().contains("loop")),
+            "thrash stop should be set after parallel identical signatures"
+        );
     }
 }

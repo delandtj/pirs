@@ -117,7 +117,7 @@ pub fn create_checkpoint(
             .output();
     }
 
-    // File-copy fallback of changed paths (best-effort).
+    // File-copy snapshot of workspace files (always; git path prefers dirty set).
     if is_git_repo(cwd) {
         if let Ok(out) = Command::new("git")
             .args(["status", "--porcelain", "-uall"])
@@ -139,6 +139,11 @@ pub fn create_checkpoint(
                 }
             }
         }
+        // Also snapshot currently tracked files that are clean but needed for restore
+        // of a later overwrite: if porcelain was empty, copy nothing extra.
+    } else {
+        // Non-git offline fallback: walk the tree and copy regular files (depth-limited).
+        snapshot_tree_files(cwd, &dir, 0)?;
     }
 
     let meta = CheckpointMeta {
@@ -205,6 +210,77 @@ pub fn restore_checkpoint(cwd: &Path, id: Option<&str>) -> anyhow::Result<String
         }
     }
     anyhow::bail!("checkpoint {} has no restorable payload", meta.id)
+}
+
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".pirs",
+    "target",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "__pycache__",
+    ".tox",
+];
+const MAX_WALK_DEPTH: usize = 6;
+const MAX_FILES: usize = 200;
+const MAX_FILE_BYTES: u64 = 512 * 1024;
+
+/// Copy regular files under `src` into `dest_root` (relative paths preserved).
+fn snapshot_tree_files(src_root: &Path, dest_root: &Path, depth: usize) -> anyhow::Result<()> {
+    fn walk(
+        src_root: &Path,
+        dest_root: &Path,
+        cur: &Path,
+        depth: usize,
+        count: &mut usize,
+    ) -> anyhow::Result<()> {
+        if depth > MAX_WALK_DEPTH || *count >= MAX_FILES {
+            return Ok(());
+        }
+        let rd = match std::fs::read_dir(cur) {
+            Ok(r) => r,
+            Err(_) => return Ok(()),
+        };
+        for ent in rd.flatten() {
+            if *count >= MAX_FILES {
+                break;
+            }
+            let name = ent.file_name();
+            let name_s = name.to_string_lossy();
+            if name_s.starts_with('.') && name_s != ".env.example" {
+                // Still allow ordinary files; skip heavy/hidden dirs by name.
+            }
+            let path = ent.path();
+            if path.is_dir() {
+                if SKIP_DIRS.iter().any(|s| *s == name_s) {
+                    continue;
+                }
+                walk(src_root, dest_root, &path, depth + 1, count)?;
+            } else if path.is_file() {
+                let meta = match path.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if meta.len() > MAX_FILE_BYTES {
+                    continue;
+                }
+                let rel = path.strip_prefix(src_root).unwrap_or(&path);
+                let dest = dest_root.join(rel);
+                if let Some(p) = dest.parent() {
+                    std::fs::create_dir_all(p)?;
+                }
+                std::fs::copy(&path, &dest)?;
+                *count += 1;
+            }
+        }
+        Ok(())
+    }
+    let mut count = 0usize;
+    walk(src_root, dest_root, src_root, depth, &mut count)?;
+    Ok(())
 }
 
 fn restore_tree(from: &Path, to: &Path) -> anyhow::Result<()> {
@@ -325,16 +401,23 @@ mod tests {
     fn create_and_restore_file_copy_without_git() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
-        // Non-git: still creates index + empty copy dir.
+        // Seed workspace file, then checkpoint must snapshot it without git.
+        std::fs::write(cwd.join("hello.txt"), b"from-cp").unwrap();
         let meta = create_checkpoint(cwd, "t1", 3).unwrap();
         assert!(meta.id.starts_with("cp"));
         let list = list_checkpoints(cwd);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].message_count, 3);
-
-        // Write a file into the copy dir and restore it.
         let copy = PathBuf::from(list[0].copy_dir.as_ref().unwrap());
-        std::fs::write(copy.join("hello.txt"), b"from-cp").unwrap();
+        assert!(
+            copy.join("hello.txt").is_file(),
+            "non-git create must snapshot workspace files into copy_dir"
+        );
+        assert_eq!(
+            std::fs::read_to_string(copy.join("hello.txt")).unwrap(),
+            "from-cp"
+        );
+        // Corrupt working tree then restore via create's snapshot.
         std::fs::write(cwd.join("hello.txt"), b"dirty").unwrap();
         let msg = restore_checkpoint(cwd, Some(&meta.id)).unwrap();
         assert!(msg.contains("restored"));

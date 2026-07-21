@@ -103,6 +103,9 @@ pub fn due_at(last_secs: u64, now_secs: u64, min_interval: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn due_at_respects_interval() {
@@ -112,16 +115,23 @@ mod tests {
 
     #[test]
     fn ensure_template_and_prompt_path() {
+        let _g = HOME_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
+        // Isolate paths without clobbering global HOME for sibling crates.
+        std::env::set_var("PIRS_HEARTBEAT_PATH", dir.path().join("heartbeat.md"));
+        // stamp_path still uses HOME — set both under lock.
+        let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", dir.path());
         let p = ensure_template().unwrap();
         assert!(p.is_file());
-        // Force due by clearing stamp
         let _ = std::fs::remove_file(stamp_path());
         let prompt = maybe_prompt(Duration::from_secs(1)).unwrap();
         assert!(prompt.contains("[heartbeat]"));
         assert!(prompt.contains("checklist") || prompt.contains("failing"));
-        // Immediately not due again
         assert!(maybe_prompt(Duration::from_secs(3600)).is_none());
+        if let Some(h) = prev_home {
+            std::env::set_var("HOME", h);
+        }
+        std::env::remove_var("PIRS_HEARTBEAT_PATH");
     }
 }

@@ -105,7 +105,8 @@ pub use doctor::{doctor_report, DoctorTool};
 pub use fleet::fleet_tools;
 pub use git_tools::git_tools;
 pub use permission_mode::{
-    permission_deny_reason, permission_hook, required_mode_for_tool, PermissionMode,
+    init_live_permission_mode, live_permission_hook, live_permission_mode, permission_deny_reason,
+    permission_hook, required_mode_for_tool, set_live_permission_mode, PermissionMode,
 };
 pub use pr_tools::pr_tools;
 pub use research::research_tools;
