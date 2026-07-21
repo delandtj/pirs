@@ -70,6 +70,56 @@ fn session_discipline_steers_todo_after_mutates() {
 }
 
 #[test]
+fn auto_checkpoint_calls_core_create_on_mutate() {
+    let _g = ENV_LOCK.lock().unwrap();
+    pirs_rhai::register_core_host_apis();
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("a.txt"), b"v1").unwrap();
+
+    let host = load("auto-checkpoint.rhai");
+    let after = host.hooks().after_tool_call.expect("after hook");
+    let result = pirs_ai::ToolResultMessage {
+        tool_call_id: "1".into(),
+        tool_name: "write".into(),
+        content: vec![pirs_ai::ContentBlock::text("ok")],
+        details: None,
+        is_error: false,
+        terminate: false,
+        timestamp: 0,
+    };
+    let _ = after("1", "write", &result);
+    let errs = host.drain_hook_errors();
+    assert!(
+        errs.is_empty(),
+        "on_tool_result should not error: {errs:?}"
+    );
+
+    let list = pirs_tools::list_checkpoints(tmp.path());
+    assert!(
+        !list.is_empty(),
+        "auto-checkpoint pack must create a core checkpoint via host API; errs={errs:?} index={:?}",
+        tmp.path().join(".pirs/checkpoints")
+    );
+    assert!(
+        list[0].copy_dir.as_ref().is_some_and(|d| {
+            std::path::Path::new(d).join("a.txt").is_file()
+        }),
+        "core checkpoint should snapshot a.txt: {:?}",
+        list[0]
+    );
+
+    // Corrupt then restore via host API used by the pack command path.
+    std::fs::write(tmp.path().join("a.txt"), b"dirty").unwrap();
+    let msg = pirs_tools::restore_checkpoint(tmp.path(), Some(&list[0].id)).unwrap();
+    assert!(msg.contains("restored"), "{msg}");
+    assert_eq!(std::fs::read_to_string(tmp.path().join("a.txt")).unwrap(), "v1");
+
+    std::env::set_current_dir(cwd).unwrap();
+}
+
+#[test]
 fn browser_cdp_workflow_steers_on_first_call() {
     let _g = ENV_LOCK.lock().unwrap();
     let host = load("browser-cdp-workflow.rhai");

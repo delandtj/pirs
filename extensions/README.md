@@ -47,6 +47,7 @@ Source of truth for order: `pirs_rhai::weak_packs::BUNDLED_ORDER` /
 | `strict-plan.rhai` | **Extra** denials under `--agent-profile plan` (network/browser); never loosens Rust plan |
 | `session-discipline.rhai` | Steer `todo` / `ask_user` usage (tools stay Rust) |
 | `browser-cdp-workflow.rhai` | CDP multi-step recipes / thrash steering (client stays Rust) |
+| `auto-checkpoint.rhai` | After successful mutate tools, call **core** `checkpoint_create` (same as tool `/checkpoint`) |
 
 Host APIs (after `register_core_host_apis()`): `project_profile(cwd)`, `project_packages(cwd)`, `skills_index(_)`, `agent_profile(_)` (active `PIRS_AGENT_PROFILE` name).
 
@@ -130,15 +131,19 @@ Two packs were retired in favor of `review-gate.rhai`, which now covers both: `r
 | Extension | What it does |
 |-----------|--------------|
 | `goal.rhai` | First-class session goals: set, pin, verify, persist. |
-| `file-checkpoints.rhai` | VCS-free per-file checkpoints (plain `cp` backups): every edit is restorable, no git required — the option for non-git working directories. |
-| `stash-checkpoint.rhai` | Git-based: snapshot via a "dangling" `git stash create` (never stages anything) every turn; `/undo` merges via `git stash apply`. |
+| **Core `checkpoint` tool / `/checkpoint`** | **Default recoverability** (not a pack): git stash create + file copies under `.pirs/checkpoints/index.json`. Always available. |
+| `auto-checkpoint.rhai` | **Thin policy:** after successful `write`/`edit`/…, call host `checkpoint_create` (same core path). Prefer this for auto-snap. |
+| `file-checkpoints.rhai` | Optional VCS-free **per-file** `cp` backups + pack `/restore` (separate log layout). |
+| `stash-checkpoint.rhai` | Optional git dangling-stash per turn + pack `/undo` (private `refs/pirs/stash-turn-*`). |
 | `dmail.rhai` | Model-initiated time travel (D-Mail). |
 | `session-handoff.rhai` | Carry context between sessions via `.pirs/handoff.md`. |
 | `skill-crystallizer.rhai` | After a successful run, distill what worked into a skill. |
 
+**Prefer core checkpoints.** Use the Rust tool `checkpoint` / slash `/checkpoint` (or `auto-checkpoint.rhai` to trigger that path). Pack-local layouts (`file-checkpoints` log, `stash-checkpoint` refs) are optional alternate policies — do not treat them as the only restore path.
+
 Two packs were retired here. `checkpoint.rhai` (singular): despite the name, it never restored file state at all (just pinned an old text summary of the message log back into context), and it collided with `file-checkpoints.rhai` — both registered the same `/checkpoints`/`/restore` commands into the same `.pirs/checkpoints/log.jsonl` with incompatible schemas, so loading both would have corrupted each other's log. `rollback.rhai`: also git-based (`git add -A && commit-tree`, `/undo` via `git restore`) but `git add -A` stages the user's entire worktree as a side effect of every snapshot — `stash-checkpoint.rhai` does the same job without that side effect, so it's the one that stayed.
 
-`file-checkpoints.rhai` and `stash-checkpoint.rhai` aren't alternatives to each other: `file-checkpoints.rhai` works with no git repo at all. Pick `file-checkpoints.rhai` for a non-git project, `stash-checkpoint.rhai` for a git one.
+`file-checkpoints.rhai` and `stash-checkpoint.rhai` aren't alternatives to each other: `file-checkpoints.rhai` works with no git repo at all. Pick `file-checkpoints.rhai` for a non-git project, `stash-checkpoint.rhai` for a git one — or skip both and use **core** `/checkpoint` + optional `auto-checkpoint.rhai`.
 
 ## Provenance & audit
 

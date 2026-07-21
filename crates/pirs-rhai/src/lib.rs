@@ -110,15 +110,16 @@ type QueryFn = std::sync::Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
 static QUERY_FNS: std::sync::RwLock<Vec<(String, QueryFn)>> = std::sync::RwLock::new(Vec::new());
 
 /// Register a host query fn available to all subsequently-loaded extensions.
+/// Replaces any existing registration under the same name (idempotent).
 pub fn register_query_fn(name: &str, f: impl Fn(&str) -> Vec<String> + Send + Sync + 'static) {
-    QUERY_FNS
-        .write()
-        .unwrap()
-        .push((name.to_string(), std::sync::Arc::new(f)));
+    let mut g = QUERY_FNS.write().unwrap();
+    g.retain(|(n, _)| n != name);
+    g.push((name.to_string(), std::sync::Arc::new(f)));
 }
 
 /// Register standard host APIs for project toolchain + skills (shared core).
 /// Call once before loading extensions so packs can call `project_profile(cwd)`.
+/// Safe to call multiple times (replaces prior registrations).
 pub fn register_core_host_apis() {
     register_query_fn("project_profile", |cwd| {
         let p = pirs_tools::detect_profile(std::path::Path::new(cwd));
@@ -161,6 +162,50 @@ pub fn register_core_host_apis() {
             .unwrap_or_else(|| "default".into());
         vec![name]
     });
+    // Core checkpoint create/restore (same path as tool `checkpoint` / `/checkpoint`).
+    // Packs call `checkpoint_create(label)` / `checkpoint_restore(id)`.
+    // Optional cwd: "label|/abs/cwd" or "id|/abs/cwd" so packs aren't cwd-racey.
+    register_query_fn("checkpoint_create", |arg| {
+        let (label, cwd) = split_label_cwd(arg);
+        let label = if label.is_empty() { "auto".into() } else { label };
+        match pirs_tools::create_checkpoint(&cwd, &label, 0) {
+            Ok(m) => vec![m.id, m.kind, format!("label={}", m.label)],
+            Err(e) => vec![format!("error:{e}")],
+        }
+    });
+    register_query_fn("checkpoint_restore", |arg| {
+        let (id, cwd) = split_label_cwd(arg);
+        let id_opt = if id.is_empty() { None } else { Some(id.as_str()) };
+        match pirs_tools::restore_checkpoint(&cwd, id_opt) {
+            Ok(msg) => vec![msg],
+            Err(e) => vec![format!("error:{e}")],
+        }
+    });
+    register_query_fn("checkpoint_list", |arg| {
+        let cwd = if arg.trim().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            std::path::PathBuf::from(arg.trim())
+        };
+        pirs_tools::list_checkpoints(&cwd)
+            .into_iter()
+            .map(|m| format!("{}|{}|{}", m.id, m.kind, m.label))
+            .collect()
+    });
+}
+
+/// Parse `label` or `label|/abs/cwd` for checkpoint host APIs.
+fn split_label_cwd(arg: &str) -> (String, std::path::PathBuf) {
+    let arg = arg.trim();
+    if let Some((label, cwd)) = arg.rsplit_once('|') {
+        if std::path::Path::new(cwd).is_absolute() || cwd.starts_with('.') {
+            return (label.trim().to_string(), std::path::PathBuf::from(cwd));
+        }
+    }
+    (
+        arg.to_string(),
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    )
 }
 
 fn build_engine(state: &StateStore, caps: &caps::Caps) -> Engine {
@@ -1545,6 +1590,34 @@ mod host_api_tests {
     use super::*;
 
     #[test]
+    fn core_host_apis_checkpoint_create_restores() {
+        register_core_host_apis();
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        std::fs::write(dir.path().join("f.txt"), b"v1").unwrap();
+        let mut created = None;
+        for (name, f) in QUERY_FNS.read().unwrap().iter() {
+            if name == "checkpoint_create" {
+                let rows = f("auto-test");
+                assert!(!rows.is_empty(), "{rows:?}");
+                assert!(!rows[0].starts_with("error:"), "{rows:?}");
+                created = Some(rows[0].clone());
+            }
+        }
+        let id = created.expect("checkpoint_create registered");
+        std::fs::write(dir.path().join("f.txt"), b"dirty").unwrap();
+        for (name, f) in QUERY_FNS.read().unwrap().iter() {
+            if name == "checkpoint_restore" {
+                let rows = f(&id);
+                assert!(rows[0].contains("restored"), "{rows:?}");
+            }
+        }
+        assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "v1");
+        std::env::set_current_dir(prev).unwrap();
+    }
+
+    #[test]
     fn core_host_apis_project_profile_on_this_repo() {
         register_core_host_apis();
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1565,3 +1638,4 @@ mod host_api_tests {
         assert!(found, "project_profile query not registered");
     }
 }
+
