@@ -1,6 +1,11 @@
 // skill-crystallizer.rhai — after a successful run, distill what worked into
 // a reusable SKILL.md so future sessions start smarter.
 //
+// Aligns with agentskills.io layout used by the shared `pirs-skills` crate
+// (`~/.pirs/skills/<name>/SKILL.md`). The harness also has a native learn path
+// (`pirs-skills::learn`); this pack remains for extension-only workflows and
+// for claw when extensions are loaded.
+//
 // Keeps its own compact transcript (tool calls/results, capped at ~6000
 // chars) in this pack's own state rather than reading ~/.pirs/audit.jsonl —
 // that file is only ever written by audit-log.rhai, so a previous version of

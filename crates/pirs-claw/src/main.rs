@@ -88,6 +88,15 @@ struct Cli {
     #[arg(long, global = true, default_value_t = false)]
     no_learn: bool,
 
+    /// Load Rhai extensions from ~/.pirs/extensions and .pirs/extensions (chat/code).
+    /// Default: on for CLI chat/code; use --no-extensions to disable.
+    #[arg(long, global = true, default_value_t = false)]
+    no_extensions: bool,
+
+    /// Also load extensions on gateway messages (default off — fail-closed surface).
+    #[arg(long, global = true, default_value_t = false)]
+    gateway_extensions: bool,
+
     #[command(subcommand)]
     cmd: Option<Commands>,
 
@@ -307,6 +316,7 @@ async fn main() -> anyhow::Result<()> {
                 sequential,
                 &skills,
                 cli.learn && !cli.no_learn && learn::learn_enabled_cli(),
+                !cli.no_extensions,
             )
             .await?;
         }
@@ -322,6 +332,7 @@ async fn main() -> anyhow::Result<()> {
                 &text,
                 &skills,
                 cli.learn && !cli.no_learn && learn::learn_enabled_cli(),
+                !cli.no_extensions,
             )
             .await?;
         }
@@ -463,12 +474,13 @@ async fn main() -> anyhow::Result<()> {
                 ScheduleCmd::List => {
                     for j in store.list()? {
                         println!(
-                            "{} name={:?} enabled={} next={} every={} deliver={} skills={:?} | {}",
+                            "{} name={:?} enabled={} next={} every={} last_run={:?} deliver={} skills={:?} | {}",
                             j.id,
                             j.name,
                             j.enabled,
                             j.next_fire,
                             j.every_secs,
+                            j.last_run,
                             j.deliver.as_config_str(),
                             j.skills,
                             j.prompt
@@ -557,6 +569,7 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(2);
             }
             let do_learn = cli.learn && !cli.no_learn && learn::learn_enabled_cli();
+            let ext = !cli.no_extensions;
             if cli.cwd.is_some() || looks_like_repo(&cwd) {
                 run_code(
                     &cwd,
@@ -568,10 +581,11 @@ async fn main() -> anyhow::Result<()> {
                     sequential,
                     &skills,
                     do_learn,
+                    ext,
                 )
                 .await?;
             } else {
-                run_chat(&state, &cli.model, &cwd, &text, &skills, do_learn).await?;
+                run_chat(&state, &cli.model, &cwd, &text, &skills, do_learn, ext).await?;
             }
         }
     }
@@ -612,6 +626,48 @@ fn chat_safe_tools(
         tools.extend(coding_tools(cwd));
     }
     tools
+}
+
+/// Load optional Rhai packs for claw chat/code (not gateway unless flagged).
+fn load_claw_extensions(cwd: &Path, enabled: bool) -> Option<Arc<pirs_rhai::ExtensionHost>> {
+    if !enabled {
+        return None;
+    }
+    pirs_rhai::register_core_host_apis();
+    let mut host = pirs_rhai::ExtensionHost::new();
+    host.load_default_dirs(cwd);
+    if !host.load_errors.is_empty() {
+        for e in &host.load_errors {
+            eprintln!("[pirs-claw extensions: {e}]");
+        }
+    }
+    let host = Arc::new(host);
+    let n = host.tools().len();
+    if n > 0 || !host.load_errors.is_empty() {
+        eprintln!(
+            "[pirs-claw extensions: {} tool(s) from packs; host APIs project_profile/skills_index]",
+            n
+        );
+    }
+    Some(host)
+}
+
+fn apply_extension_host(
+    agent: Agent,
+    host: Option<&Arc<pirs_rhai::ExtensionHost>>,
+) -> Agent {
+    let Some(host) = host else {
+        return agent;
+    };
+    let mut tools = agent.tools.clone();
+    tools.extend(host.tools());
+    // Dedupe by name (packs may re-register).
+    {
+        let mut seen = std::collections::HashSet::new();
+        tools.retain(|t| seen.insert(t.name().to_string()));
+    }
+    let hooks = host.hooks();
+    agent.with_tools(tools).with_hooks(hooks)
 }
 
 async fn fire_schedule_job(
@@ -801,11 +857,13 @@ async fn run_chat(
     text: &str,
     skills: &[Skill],
     do_learn: bool,
+    load_ext: bool,
 ) -> anyhow::Result<()> {
     let inbound = InboundMessage::cli(text);
     let (provider, key, _reg) = registry::resolve_llm(model, 2)?;
     require_llm_key(key.as_deref())?;
     let key_for_learn = key.clone();
+    let host = load_claw_extensions(cwd, load_ext);
 
     let sid = SessionId::cli_local();
     let store = SessionStore::open_for(state, sid.clone())?;
@@ -837,6 +895,7 @@ async fn run_chat(
         .with_system_prompt(sys)
         .with_tools(tools)
         .with_completion(completion);
+    agent = apply_extension_host(agent, host.as_ref());
 
     let prior = store.load()?;
     if prior.len() > 1 {
@@ -898,6 +957,7 @@ async fn run_code(
     sequential: bool,
     skills: &[Skill],
     do_learn: bool,
+    load_ext: bool,
 ) -> anyhow::Result<()> {
     let opts = apply_code_defaults(CodeOptions {
         cwd: cwd.to_path_buf(),
@@ -927,6 +987,7 @@ async fn run_code(
     let retries = if sequential { 3 } else { 2 };
     let (provider, key, _) = registry::resolve_llm(&opts.model, retries)?;
     require_llm_key(key.as_deref())?;
+    let host = load_claw_extensions(&opts.cwd, load_ext);
     let completion = pirs_ai::CompletionOptions {
         api_key: key,
         ..Default::default()
@@ -935,6 +996,7 @@ async fn run_code(
     let project_section = pirs_tools::detect_profile(&opts.cwd).prompt_section();
     let key_for_learn = completion.api_key.clone();
     let skills_owned: Vec<Skill> = skills.to_vec();
+    let host_c = host.clone();
 
     if strategy.name != "monolithic" && strategy.steps.len() > 1 {
         let opts_c = opts.clone();
@@ -990,6 +1052,7 @@ async fn run_code(
                 .with_system_prompt(system)
                 .with_tools(tools)
                 .with_completion(completion_c.clone());
+            agent = apply_extension_host(agent, host_c.as_ref());
             if let Some(n) = opts_c.max_turns {
                 agent.budgets.max_turns = Some(n);
             }
@@ -1043,6 +1106,7 @@ async fn run_code(
         .with_completion(completion)
         .with_system_prompt(sys)
         .with_tools(tools);
+    agent = apply_extension_host(agent, host.as_ref());
     let msgs = agent.prompt(prompt).await?;
     if let Some(reply) = extract_assistant_reply(&msgs) {
         if do_learn {

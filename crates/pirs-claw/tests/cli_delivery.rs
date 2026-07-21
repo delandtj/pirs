@@ -414,6 +414,41 @@ fn help_mentions_pair_and_skills() {
 }
 
 #[test]
+fn schedule_list_shows_last_run_field() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().to_str().unwrap();
+    let (c1, o1, e1) = run(&[
+        "--state-dir",
+        state,
+        "schedule",
+        "add",
+        "--in",
+        "99999",
+        "--name",
+        "later",
+        "job-body",
+    ]);
+    assert_eq!(c1, 0, "{o1}{e1}");
+    let (c2, o2, e2) = run(&["--state-dir", state, "schedule", "list"]);
+    assert_eq!(c2, 0, "{o2}{e2}");
+    assert!(
+        o2.contains("last_run="),
+        "schedule list must show last_run: {o2}"
+    );
+}
+
+#[test]
+fn help_mentions_no_extensions() {
+    let (code, stdout, stderr) = run(&["--help"]);
+    assert_eq!(code, 0);
+    let text = format!("{stdout}{stderr}").to_lowercase();
+    assert!(
+        text.contains("no-extensions") || text.contains("extensions"),
+        "help should mention extensions flag: {text}"
+    );
+}
+
+#[test]
 fn schedule_pause_and_remove() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().to_str().unwrap();

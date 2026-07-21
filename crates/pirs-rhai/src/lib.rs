@@ -117,6 +117,43 @@ pub fn register_query_fn(name: &str, f: impl Fn(&str) -> Vec<String> + Send + Sy
         .push((name.to_string(), std::sync::Arc::new(f)));
 }
 
+/// Register standard host APIs for project toolchain + skills (shared core).
+/// Call once before loading extensions so packs can call `project_profile(cwd)`.
+pub fn register_core_host_apis() {
+    register_query_fn("project_profile", |cwd| {
+        let p = pirs_tools::detect_profile(std::path::Path::new(cwd));
+        let mut lines = Vec::new();
+        if let Some(t) = p.toolchain {
+            lines.push(format!("toolchain={t}"));
+        }
+        for (k, v) in [
+            ("test", p.test),
+            ("lint", p.lint),
+            ("typecheck", p.typecheck),
+            ("build", p.build),
+            ("format", p.format),
+            ("run", p.run),
+        ] {
+            if let Some(cmd) = v {
+                lines.push(format!("{k}={cmd}"));
+            }
+        }
+        lines
+    });
+    register_query_fn("project_packages", |cwd| {
+        pirs_tools::discover_packages(std::path::Path::new(cwd))
+            .into_iter()
+            .map(|p| format!("{}|{}|{}", p.name, p.path, p.toolchain.unwrap_or_default()))
+            .collect()
+    });
+    register_query_fn("skills_index", |_arg| {
+        pirs_skills::discover_skills(std::path::Path::new("."))
+            .into_iter()
+            .map(|s| format!("{}: {}", s.name, s.description))
+            .collect()
+    });
+}
+
 fn build_engine(state: &StateStore, caps: &caps::Caps) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(200_000);
@@ -1491,5 +1528,31 @@ impl AgentTool for RhaiTool {
             output.to_string()
         };
         Ok(ToolOutput::text(text))
+    }
+}
+
+#[cfg(test)]
+mod host_api_tests {
+    use super::*;
+
+    #[test]
+    fn core_host_apis_project_profile_on_this_repo() {
+        register_core_host_apis();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let mut found = false;
+        for (name, f) in QUERY_FNS.read().unwrap().iter() {
+            if name == "project_profile" {
+                let lines = f(root.to_str().unwrap());
+                assert!(
+                    lines.iter().any(|l| l.contains("cargo") || l.starts_with("test=")),
+                    "project_profile lines: {lines:?}"
+                );
+                found = true;
+            }
+        }
+        assert!(found, "project_profile query not registered");
     }
 }

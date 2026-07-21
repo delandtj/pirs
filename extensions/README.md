@@ -42,6 +42,10 @@ Source of truth for order: `pirs_rhai::weak_packs::BUNDLED_ORDER` /
 | `conductor.rhai` | Strong-planner / weak-executor **instructions** only (no `update_plan` tool — use with weak-model for the real pin) |
 | `verify-guard.rhai` | Treat “0 tests ran” as failed verify |
 | `sandbox.rhai` / `guardrails.rhai` | OS sandbox / catastrophic command denylist |
+| `project-discipline.rhai` | Steer toward shared `project` tool after repeated shell test/lint |
+| `skill-crystallizer.rhai` | Pack-side skill distill (native path: `pirs-skills::learn`) |
+
+Host APIs (after `register_core_host_apis()`): `project_profile(cwd)`, `project_packages(cwd)`, `skills_index(_)`.
 
 ## Composition hazards (last-wins / pin channels)
 

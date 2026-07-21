@@ -4,11 +4,17 @@ pub mod anthropic;
 pub mod embed;
 pub mod openai;
 pub mod pricing;
+pub mod registry_file;
 pub mod routing;
 pub mod sse;
 pub use anthropic::AnthropicClient;
 pub use embed::{cosine, EmbeddingClient};
 pub use openai::OpenAiCompat;
+pub use registry_file::{
+    api_key_for_alias, build_routing_provider, expected_key_envs, first_available_backend_key,
+    load_user_registry, merge as merge_registry, parse_from_config_value, registry_file_has_models,
+    user_config_path, BackendEntry, ModelEntry, RegistryFile, ServeEntry,
+};
 pub use routing::{BackendKind, BackendSpec, ModelRoute, RoutingProvider, ServeTarget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

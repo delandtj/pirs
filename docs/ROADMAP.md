@@ -77,11 +77,11 @@ Prioritize **publish + harden spines**, not new moats.
 
 | Priority | Theme | Concrete outcomes | Surface | Rust vs Rhai |
 |----------|--------|-------------------|---------|--------------|
-| **P0** | **Publish local main** | `git push` (or PR) so origin matches product; optional delete `feat/weak-model-hardening` | ops | n/a |
-| **P0** | **Telegram production checklist live** | One real bot + systemd unit + secrets mode 600; document failure modes | claw | Rust already |
-| **P1** | **Registry single source** | Claw stops maintaining a parallel thin parser; user registry helpers shared (extract from harness config path without claw→pirs binary dep) | core | **Rust** |
-| **P1** | **Claw loads extensions (optional)** | `~/.pirs/extensions` on claw chat/code so packs apply; gateway stays fail-closed | claw | host wire **Rust**; packs **Rhai** |
-| **P1** | **Policy packs aligned with core** | Refresh `skill-crystallizer.rhai` to match `pirs-skills`; `project-discipline.rhai` (prefer project over raw cargo); document `web-tools.rhai` as legacy | rhai | **Rhai** on Rust tools |
+| **P0** | **Publish local main** | Still **ops**: `git push` (or PR); optional delete `feat/weak-model-hardening` | ops | n/a |
+| **P0** | **Telegram production checklist live** | Still **ops**: needs real `TELEGRAM_BOT_TOKEN` + host; checklist/unit exist | claw | Rust already |
+| **P1** | **Registry single source** | ✅ `pirs_ai::registry_file` shared; claw + harness use it | core | **Rust** |
+| **P1** | **Claw loads extensions (optional)** | ✅ default on chat/code; `--no-extensions`; gateway opt-in `--gateway-extensions` | claw | host wire **Rust**; packs **Rhai** |
+| **P1** | **Policy packs aligned with core** | ✅ crystallizer notes + `project-discipline.rhai` + host APIs | rhai | **Rhai** on Rust tools |
 | **P2** | **One deep non-Telegram channel** | Only if a real user needs it: pick **one** of Slack or Discord and take to production depth (signatures, threads) — do not deepen both stubs | claw | **Rust** |
 | **P2** | **Cron quality without Hermes scope** | Job `last_run` visibility; optional attach model already exists; **no** cron expressions / no-agent scripts unless forced | claw | **Rust** |
 | **P2** | **Bench + weak loop** | Keep pirs-bench as truth; optional wire project profile into more auto-verify ecosystems | bench/core | **Rust** |

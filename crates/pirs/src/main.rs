@@ -949,6 +949,7 @@ async fn main() -> anyhow::Result<()> {
     let host = if cli.no_extensions {
         None
     } else {
+        pirs_rhai::register_core_host_apis();
         let mut h = pirs_rhai::ExtensionHost::new();
         if let Some(g) = &graph {
             let g = std::sync::Arc::clone(g);

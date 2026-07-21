@@ -1090,4 +1090,31 @@ mod tests {
         assert!(h.contains("project(action: \"lint\")"));
         assert!(detect_project_command_hint("echo hi").is_none());
     }
+
+    /// Hard path: this repo's own workspace must detect as cargo + packages.
+    #[test]
+    fn detects_pirs_workspace_root() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let p = detect_profile(&root);
+        assert!(
+            p.toolchain.as_deref().unwrap_or("").contains("cargo")
+                || p.test.as_deref() == Some("cargo test"),
+            "pirs root profile: {p:?}"
+        );
+        assert_eq!(p.test.as_deref(), Some("cargo test"));
+        let pkgs = discover_packages(&root);
+        assert!(
+            pkgs.len() >= 5,
+            "expected monorepo crates, got {}: {:?}",
+            pkgs.len(),
+            pkgs.iter().map(|p| &p.path).collect::<Vec<_>>()
+        );
+        assert!(
+            pkgs.iter().any(|p| p.path.contains("pirs-tools") || p.name.contains("pirs-tools")),
+            "packages={pkgs:?}"
+        );
+    }
 }

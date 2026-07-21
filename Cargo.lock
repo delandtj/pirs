@@ -1746,6 +1746,7 @@ dependencies = [
 name = "pirs-ai"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "futures-util",
  "reqwest",
@@ -1754,6 +1755,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "toml",
  "tracing",
 ]
 
@@ -1912,6 +1914,8 @@ dependencies = [
  "libc",
  "pirs-agent",
  "pirs-ai",
+ "pirs-skills",
+ "pirs-tools",
  "rhai",
  "serde",
  "serde_json",

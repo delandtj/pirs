@@ -1,135 +1,33 @@
-//! Named backends + model aliases for multi-subscription routing.
+//! Named backends + model aliases — shared parse/build in `pirs_ai::registry_file`.
 //!
-//! Loaded from `[[backends]]` / `[[models]]` in user and project `config.toml`.
-//! Project-layer **backends** are allowed only when the project directory is
-//! trusted (`pirs trust`); otherwise they are stripped with a warning. Model
-//! aliases may live in either layer.
-//!
-//! `serve` is an ordered list — first entry is primary; later entries are
-//! failover when the primary stream errors before producing content.
-//!
-//! ```toml
-//! [[backends]]
-//! name = "openrouter"
-//! kind = "openai_compatible"
-//! base_url = "https://openrouter.ai/api/v1"
-//! api_key_env = "OPENROUTER_API_KEY"
-//! headers = { HTTP-Referer = "https://example.com", X-Title = "pirs" }
-//!
-//! [[models]]
-//! alias = "deepseek-v4-flash"
-//! serve = [
-//!   { backend = "openrouter", model = "deepseek/deepseek-v4-flash" },
-//!   { backend = "dashscope", model = "deepseek-v4-flash" },  # failover
-//! ]
-//! ```
+//! This module adds **project trust layering** and secrets.env loading for the harness.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail};
 use pirs_ai::{
-    AnthropicClient, BackendKind, LlmProvider, ModelRoute, OpenAiCompat, RoutingProvider,
-    ServeTarget,
+    api_key_for_alias as shared_api_key, build_routing_provider as shared_build,
+    expected_key_envs as shared_envs, first_available_backend_key as shared_first_key,
+    merge_registry, parse_from_config_value as shared_parse, LlmProvider, RoutingProvider,
 };
-use serde::Deserialize;
 
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct RegistryFile {
-    #[serde(default)]
-    pub backends: Vec<BackendEntry>,
-    #[serde(default)]
-    pub models: Vec<ModelEntry>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BackendEntry {
-    pub name: String,
-    #[serde(default = "default_kind")]
-    pub kind: String,
-    pub base_url: String,
-    pub api_key_env: Option<String>,
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-}
-
-fn default_kind() -> String {
-    "openai_compatible".into()
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ModelEntry {
-    pub alias: String,
-    #[allow(dead_code)]
-    pub persona: Option<String>,
-    pub tier: Option<String>,
-    pub ctx: Option<u64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub caps: Vec<String>,
-    /// Ordered serve targets; first is primary, rest are failover.
-    pub serve: Vec<ServeEntry>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ServeEntry {
-    pub backend: String,
-    pub model: String,
-}
+pub use pirs_ai::{BackendEntry, ModelEntry, RegistryFile, ServeEntry};
 
 pub fn merge(base: RegistryFile, over: RegistryFile) -> RegistryFile {
-    let mut backends = base.backends;
-    for b in over.backends {
-        if let Some(i) = backends.iter().position(|x| x.name == b.name) {
-            backends[i] = b;
-        } else {
-            backends.push(b);
-        }
-    }
-    let mut models = base.models;
-    for m in over.models {
-        if let Some(i) = models.iter().position(|x| x.alias == m.alias) {
-            models[i] = m;
-        } else {
-            models.push(m);
-        }
-    }
-    RegistryFile { backends, models }
+    merge_registry(base, over)
 }
 
 #[cfg(test)]
 pub fn parse_registry_toml(text: &str) -> anyhow::Result<RegistryFile> {
-    Ok(toml::from_str(text)?)
+    let v: toml::Value = text.parse()?;
+    Ok(shared_parse(&v))
 }
 
 pub fn parse_from_config_value(value: &toml::Value) -> RegistryFile {
-    let table = match value.as_table() {
-        Some(t) => t,
-        None => return RegistryFile::default(),
-    };
-    let mut partial = toml::map::Map::new();
-    if let Some(b) = table.get("backends") {
-        partial.insert("backends".into(), b.clone());
-    }
-    if let Some(m) = table.get("models") {
-        partial.insert("models".into(), m.clone());
-    }
-    if partial.is_empty() {
-        return RegistryFile::default();
-    }
-    match toml::Value::Table(partial).try_into::<RegistryFile>() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[warning: backends/models in config.toml ignored: {e}]");
-            RegistryFile::default()
-        }
-    }
+    shared_parse(value)
 }
 
 /// True when the project's `.pirs/extensions` is in the pirs trust store.
-/// Trust keys look like `{canonical_extensions_path}#{scripts_hash}` (see
-/// `pirs_rhai::trust_directory`).
 fn project_is_trusted(project_pirs_dir: &Path) -> bool {
     let Ok(home) = std::env::var("HOME") else {
         return false;
@@ -150,9 +48,7 @@ fn project_is_trusted(project_pirs_dir: &Path) -> bool {
         .any(|t| t.starts_with(&prefix) || t == path_s.as_ref() || t.starts_with(path_s.as_ref()))
 }
 
-/// Load `~/.pirs/secrets.env` into the process environment for any vars not
-/// already set. Lets `api_key_env` in config.toml work without re-sourcing the
-/// shell (bash/nushell already source it; this covers bare `pirs` launches).
+/// Load `~/.pirs/secrets.env` into the process environment for any vars not already set.
 pub fn load_secrets_env() {
     let Some(home) = std::env::var_os("HOME") else {
         return;
@@ -172,7 +68,7 @@ pub fn load_secrets_env() {
         };
         let name = name.trim();
         if name.is_empty() || std::env::var_os(name).is_some() {
-            continue; // never override an already-set var
+            continue;
         }
         let mut val = raw.trim().to_string();
         if (val.starts_with('\'') && val.ends_with('\''))
@@ -180,7 +76,6 @@ pub fn load_secrets_env() {
         {
             val = val[1..val.len() - 1].to_string();
         }
-        // Expand ${OTHER} once (e.g. DASHSCOPE_API_KEY=${BAILIAN_...}).
         if val.starts_with("${") && val.ends_with('}') {
             let ref_name = &val[2..val.len() - 1];
             val = std::env::var(ref_name).unwrap_or_default();
@@ -188,44 +83,20 @@ pub fn load_secrets_env() {
                 continue;
             }
         }
-        // SAFETY: single-threaded at process startup before workers spawn.
         std::env::set_var(name, val);
     }
 }
 
-/// API key for a model alias from its primary serve backend's `api_key_env`.
 pub fn api_key_for_alias(registry: &RegistryFile, alias: &str) -> Option<String> {
-    let model = registry.models.iter().find(|m| m.alias == alias)?;
-    let serve = model.serve.first()?;
-    let backend = registry.backends.iter().find(|b| b.name == serve.backend)?;
-    let env = backend.api_key_env.as_ref()?;
-    std::env::var(env).ok().filter(|s| !s.is_empty())
+    shared_api_key(registry, alias)
 }
 
-/// First non-empty backend key in the registry (fallback default provider key).
 pub fn first_available_backend_key(registry: &RegistryFile) -> Option<String> {
-    for b in &registry.backends {
-        if let Some(env) = &b.api_key_env {
-            if let Ok(k) = std::env::var(env) {
-                if !k.is_empty() {
-                    return Some(k);
-                }
-            }
-        }
-    }
-    None
+    shared_first_key(registry)
 }
 
-/// Human-readable list of expected env vars for the registry.
 pub fn expected_key_envs(registry: &RegistryFile) -> Vec<String> {
-    let mut v: Vec<String> = registry
-        .backends
-        .iter()
-        .filter_map(|b| b.api_key_env.clone())
-        .collect();
-    v.sort();
-    v.dedup();
-    v
+    shared_envs(registry)
 }
 
 pub fn load_registry_layers(cwd: &Path) -> RegistryFile {
@@ -238,8 +109,6 @@ pub fn load_registry_layers(cwd: &Path) -> RegistryFile {
         }
     }
     if let Some(path) = crate::config_file::find_project_config(cwd) {
-        // When cwd is $HOME, find_project_config hits ~/.pirs/config.toml — that
-        // is already the user layer; do not re-load it as an untrusted project.
         let user_path = crate::config_file::user_config_path();
         let same_as_user = user_path
             .as_ref()
@@ -285,113 +154,13 @@ pub fn build_routing_provider(
     default_api_key: Option<String>,
     max_retries: u32,
 ) -> anyhow::Result<Option<Arc<RoutingProvider>>> {
-    if registry.backends.is_empty() && registry.models.is_empty() {
-        return Ok(None);
-    }
-    if registry.models.is_empty() {
-        return Ok(None);
-    }
-
-    let mut backend_handles: HashMap<
-        String,
-        (
-            Arc<dyn LlmProvider>,
-            Option<String>,
-            Vec<(String, String)>,
-        ),
-    > = HashMap::new();
-
-    for b in &registry.backends {
-        let kind = BackendKind::parse(&b.kind)
-            .ok_or_else(|| anyhow!("backend {:?}: unknown kind {:?}", b.name, b.kind))?;
-        let api_key = b
-            .api_key_env
-            .as_ref()
-            .and_then(|env| std::env::var(env).ok())
-            .filter(|s| !s.is_empty());
-        if b.api_key_env.is_some() && api_key.is_none() {
-            eprintln!(
-                "[warning: backend {:?} api_key_env {:?} is unset]",
-                b.name,
-                b.api_key_env.as_deref().unwrap_or("")
-            );
-        }
-        let headers: Vec<(String, String)> =
-            b.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let provider: Arc<dyn LlmProvider> = match kind {
-            BackendKind::OpenaiCompatible => Arc::new(
-                OpenAiCompat::new(Some(b.base_url.clone()))
-                    .with_max_retries(max_retries)
-                    .with_provider_name(b.name.clone()),
-            ),
-            BackendKind::Anthropic => Arc::new(
-                AnthropicClient::new(Some(b.base_url.clone())).with_max_retries(max_retries),
-            ),
-        };
-        backend_handles.insert(b.name.clone(), (provider, api_key, headers));
-    }
-
-    let mut routes = Vec::new();
-    for m in &registry.models {
-        if m.serve.is_empty() {
-            bail!("model alias {:?} has empty serve list", m.alias);
-        }
-        let mut serve = Vec::new();
-        for s in &m.serve {
-            if !backend_handles.contains_key(&s.backend) && s.backend != "default" {
-                bail!(
-                    "model alias {:?} serves backend {:?} which is not defined in [[backends]]",
-                    m.alias,
-                    s.backend
-                );
-            }
-            serve.push(ServeTarget {
-                backend: s.backend.clone(),
-                remote_model: s.model.clone(),
-            });
-        }
-        routes.push(ModelRoute {
-            alias: m.alias.clone(),
-            serve,
-            tier: m.tier.clone(),
-            ctx: m.ctx,
-        });
-    }
-
-    if routes
-        .iter()
-        .any(|r| r.serve.iter().any(|s| s.backend == "default"))
-    {
-        backend_handles.insert(
-            "default".into(),
-            (Arc::clone(&default), default_api_key.clone(), vec![]),
-        );
-    }
-
-    for r in &routes {
-        for s in &r.serve {
-            if !backend_handles.contains_key(&s.backend) {
-                bail!(
-                    "model alias {:?} needs backend {:?} — add it under [[backends]]",
-                    r.alias,
-                    s.backend
-                );
-            }
-        }
-    }
-
-    Ok(Some(Arc::new(RoutingProvider::new(
-        default,
-        default_api_key,
-        vec![],
-        backend_handles,
-        routes,
-    ))))
+    shared_build(registry, default, default_api_key, max_retries)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pirs_ai::OpenAiCompat;
 
     const SAMPLE: &str = r#"
 [[backends]]
@@ -483,7 +252,6 @@ serve = [{ backend = "b", model = "new" }]
     #[test]
     fn build_routing_keeps_full_serve_chain() {
         let reg = parse_registry_toml(SAMPLE).unwrap();
-        // Don't need real keys for construction — empty env is fine.
         let default: Arc<dyn LlmProvider> = Arc::new(OpenAiCompat::new(None));
         let router = build_routing_provider(&reg, default, None, 0)
             .unwrap()
