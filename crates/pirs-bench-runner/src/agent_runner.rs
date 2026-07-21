@@ -40,6 +40,45 @@ struct ReportedResult {
     outcome: String, // "pass" | "fail" | "error" | "unknown"
 }
 
+/// Match a discovery-agent-reported id against a requested harness id.
+///
+/// Handles SWE-bench django/unittest labels like
+/// `test_foo (utils_tests.test_mod.Class)` vs a short `test_foo` report, and
+/// pytest node-id leaf matching.
+pub fn report_id_matches(reported: &str, requested: &str) -> bool {
+    let reported = reported.trim();
+    let requested = requested.trim();
+    if reported.is_empty() {
+        return false;
+    }
+    if reported == requested {
+        return true;
+    }
+    // Unittest label: "test_name (module.Class)"
+    if let Some((name, rest)) = requested.split_once(" (") {
+        let name = name.trim();
+        if reported == name {
+            return true;
+        }
+        // "module.Class.test_name" form
+        let class = rest.trim_end_matches(')').trim();
+        if !class.is_empty() && reported == format!("{class}.{name}") {
+            return true;
+        }
+        if reported.ends_with(name) && reported.contains(class.rsplit('.').next().unwrap_or("")) {
+            return true;
+        }
+    }
+    // Pytest node id leaf (strip path + optional [params])
+    fn leaf(s: &str) -> String {
+        let last = s.rsplit([':', '/']).next().unwrap_or(s);
+        last.split('[').next().unwrap_or(last).to_string()
+    }
+    let a = leaf(reported);
+    let b = leaf(requested);
+    !a.is_empty() && a == b && a.starts_with("test_")
+}
+
 /// Captures the discovery agent's one required tool call and ends its turn.
 /// This is the *only* way the sub-agent can conclude — there is no other
 /// termination path, so a run that never calls it exhausts its turn budget
@@ -112,6 +151,10 @@ fn discovery_system_prompt(ids: &[TestId]) -> String {
          tests. Only report an outcome you have verified by running it — \
          never guess. When you have a real answer for every id, call \
          report_test_results with one entry per id.\n\n\
+         CRITICAL: In report_test_results, set each result's `id` field to the \
+         EXACT string from the list below (copy-paste). Do not shorten ids.\n\n\
+         Hints: Django often uses `./tests/runtests.py --settings=test_sqlite \
+         module.Class.test_name`. Sympy often uses `bin/test test_name`.\n\n\
          Test ids:\n{}",
         ids.join("\n")
     )
@@ -260,9 +303,13 @@ impl TestRunner for AgentDiscoveredRunner {
             reported
         );
         let pairs = ids.iter().map(|id| {
+            // Exact match first; then fuzzy — discovery agents often report the
+            // leaf name (`test_foo`) while SWE-bench FAIL_TO_PASS uses unittest
+            // labels (`test_foo (module.Class)`). Strict equality made every
+            // django/sympy instance die at ReproFailed with turns=0.
             let outcome = reported
                 .iter()
-                .find(|r| &r.id == id)
+                .find(|r| report_id_matches(&r.id, id))
                 .map(|r| match r.outcome.as_str() {
                     "pass" => TestOutcome::Pass,
                     "fail" | "error" => TestOutcome::Fail,
@@ -287,6 +334,28 @@ impl TestRunner for AgentDiscoveredRunner {
 mod tests {
     use super::*;
     use pirs_ai::{AssistantMessage, ContentBlock, StopReason, StreamEvent};
+
+    #[test]
+    fn report_id_matches_unittest_label_and_leaf() {
+        let req = "test_path_with_embedded_null_bytes (utils_tests.test_autoreload.TestIterModulesAndFiles)";
+        assert!(report_id_matches(
+            "test_path_with_embedded_null_bytes",
+            req
+        ));
+        assert!(report_id_matches(req, req));
+        assert!(report_id_matches(
+            "utils_tests.test_autoreload.TestIterModulesAndFiles.test_path_with_embedded_null_bytes",
+            req
+        ));
+        assert!(!report_id_matches("test_other", req));
+    }
+
+    #[test]
+    fn report_id_matches_pytest_leaf() {
+        let req = "astropy/modeling/tests/test_separable.py::test_separable[compound_model6-result6]";
+        assert!(report_id_matches("test_separable[compound_model6-result6]", req));
+        assert!(report_id_matches(req, req));
+    }
 
     /// A scripted provider standing in for a real LLM: its one scripted turn
     /// emits the tool call the discovery agent needs; the loop then

@@ -88,27 +88,30 @@ def run_instance(instance_id: str, model: str, max_turns: int, timeout_s: int, o
         if strategy_script:
             sh(["docker", "cp", strategy_script, f"{cname}:/tmp/strategy.rhai"], stdout=log, stderr=log)
 
+        # Use --flag=value so keep-green / target ids that start with "-"
+        # (e.g. django docstring titles like "--squashed-name …") are not
+        # re-parsed as CLI flags by clap.
         cmd = ["pirs-bench", "solve", "/testbed"]
         for t in targets:
-            cmd += ["-t", t]
+            cmd.append(f"--target={t}")
         for k in keep_green:
-            cmd += ["-k", k]
+            cmd.append(f"--keep-green={k}")
         cmd += [
-            "--issue-file", "/tmp/issue.md",
-            "--base-sha", head_sha,
-            "--provider", provider,
-            "--model", model,
-            "--max-turns", str(max_turns),
-            "--out", "/tmp/out.patch",
+            "--issue-file=/tmp/issue.md",
+            f"--base-sha={head_sha}",
+            f"--provider={provider}",
+            f"--model={model}",
+            f"--max-turns={max_turns}",
+            "--out=/tmp/out.patch",
         ]
         if provider == "openai-compat":
             if not base_url:
                 raise ValueError("base_url is required when provider='openai-compat'")
-            cmd += ["--base-url", base_url]
+            cmd.append(f"--base-url={base_url}")
         if no_strategy:
             cmd += ["--no-strategy"]
         elif strategy_script:
-            cmd += ["--strategy-script", "/tmp/strategy.rhai"]
+            cmd.append("--strategy-script=/tmp/strategy.rhai")
         logline("cmd: " + " ".join(cmd))
 
         env_key_name = {
