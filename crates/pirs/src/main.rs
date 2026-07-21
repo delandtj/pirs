@@ -309,23 +309,53 @@ impl Default for Printer {
     }
 }
 
-/// Installs the approval/profile gate as the before-tool hook when nothing else
-/// claimed the slot. Pure yolo without a safety profile waives the gate;
-/// non-default `--agent-profile` always installs (hard denials).
+/// Installs the approval gate as the before-tool hook when nothing else claimed
+/// the slot. Yolo mode explicitly waives this install (interactive approval);
+/// safety-profile denials under yolo are chained separately via
+/// [`chain_gate_with_extensions`] / [`install_profile_under_yolo_if_needed`].
 fn install_gate_if_absent(
     hooks: &mut pirs_agent::Hooks,
     gate_hook: &Option<pirs_agent::events::BeforeToolCallHook>,
     approval: &str,
 ) {
     let yolo = approval::ApprovalMode::parse(approval) == Some(approval::ApprovalMode::Yolo);
-    // If a gate_hook is present, it may encode safety-profile denials even when
-    // approval is auto; only skip when yolo *and* no hook was built.
-    if yolo && gate_hook.is_none() {
-        return;
-    }
-    if hooks.before_tool_call.is_none() {
+    if !yolo && hooks.before_tool_call.is_none() {
         hooks.before_tool_call = gate_hook.clone();
     }
+}
+
+/// Under yolo, still enforce non-default `--agent-profile` hard denials when no
+/// before_tool hook was installed (e.g. `--no-extensions`).
+fn install_profile_under_yolo_if_needed(
+    hooks: &mut pirs_agent::Hooks,
+    gate_hook: &Option<pirs_agent::events::BeforeToolCallHook>,
+    approval: &str,
+    safety: pirs_tools::SafetyProfile,
+) {
+    let yolo = approval::ApprovalMode::parse(approval) == Some(approval::ApprovalMode::Yolo);
+    if yolo
+        && safety != pirs_tools::SafetyProfile::Default
+        && hooks.before_tool_call.is_none()
+    {
+        hooks.before_tool_call = gate_hook.clone();
+    }
+}
+
+/// Chain approval/profile gate with extension before_tool hooks.
+/// Under yolo, skip the interactive approval gate unless a non-default safety
+/// profile requires hard denials (then chain gate first, then extensions).
+fn chain_gate_with_extensions(
+    gate_hook: Option<pirs_agent::events::BeforeToolCallHook>,
+    ext_before: Option<pirs_agent::events::BeforeToolCallHook>,
+    yolo: bool,
+    safety: pirs_tools::SafetyProfile,
+) -> Option<pirs_agent::events::BeforeToolCallHook> {
+    if yolo && safety == pirs_tools::SafetyProfile::Default {
+        // Pure yolo: extensions only (no interactive approval gate).
+        return ext_before;
+    }
+    // ask/auto, or yolo+profile: gate first (profile denials / prompts), then ext.
+    pirs_agent::Hooks::chain_before(gate_hook, ext_before)
 }
 
 fn print_usage(report: &pirs_agent::usage::UsageReport) {
@@ -1068,24 +1098,21 @@ async fn main() -> anyhow::Result<()> {
             _ => None,
         };
         if let Some((b, a)) = &policy_hooks {
-            let b_for_sub = if yolo {
-                Some(b.clone())
-            } else {
-                pirs_agent::Hooks::chain_before(gate_hook.clone(), Some(b.clone()))
-            };
-            if let Some(b_chained) = b_for_sub {
+            if let Some(b_chained) =
+                chain_gate_with_extensions(gate_hook.clone(), Some(b.clone()), yolo, safety)
+            {
                 *policy_slot.lock().unwrap() = Some((b_chained, a.clone()));
             }
         }
         // Extension before/after hooks always install (weak-model loop detection,
-        // verify-after-edit tracking). YOLO only skips the interactive approval
-        // *gate* — not rhai policy/hardening packs. Harness control (loop
-        // detection, verify-after-edit) must run even when the user opts out of prompts.
-        hooks.before_tool_call = if yolo {
-            ext_hooks.before_tool_call
-        } else {
-            pirs_agent::Hooks::chain_before(gate_hook.clone(), ext_hooks.before_tool_call)
-        };
+        // verify-after-edit tracking). YOLO skips interactive approval prompts
+        // but still chains `--agent-profile` hard denials when profile != default.
+        hooks.before_tool_call = chain_gate_with_extensions(
+            gate_hook.clone(),
+            ext_hooks.before_tool_call,
+            yolo,
+            safety,
+        );
         {
             let rhai_after = ext_hooks.after_tool_call;
             let graph_after = graph.clone().map(|g| {
@@ -1187,6 +1214,8 @@ async fn main() -> anyhow::Result<()> {
     // chained install above only runs in the extensions branch, and without
     // this fallback `--approval ask --no-extensions` had no gate at all.
     install_gate_if_absent(&mut hooks, &gate_hook, &cli.approval);
+    // yolo + --agent-profile plan (etc.) with no extensions: still enforce denials.
+    install_profile_under_yolo_if_needed(&mut hooks, &gate_hook, &cli.approval, safety);
 
     if !cli.no_mcp {
         let mcp = pirs_mcp::load_servers(&cwd).await;
@@ -2202,6 +2231,65 @@ mod tests {
         assert_eq!(
             before("1", "x", &serde_json::json!({})).as_deref(),
             Some("ext")
+        );
+    }
+
+    #[test]
+    fn yolo_with_plan_profile_installs_denials_without_extensions() {
+        let mut hooks = pirs_agent::Hooks::default();
+        install_gate_if_absent(&mut hooks, &gate(), "yolo");
+        assert!(hooks.before_tool_call.is_none());
+        install_profile_under_yolo_if_needed(
+            &mut hooks,
+            &gate(),
+            "yolo",
+            pirs_tools::SafetyProfile::Plan,
+        );
+        let before = hooks.before_tool_call.expect("profile under yolo");
+        assert_eq!(
+            before("1", "danger", &serde_json::json!({})).as_deref(),
+            Some("blocked by gate")
+        );
+    }
+
+    #[test]
+    fn yolo_with_plan_chains_gate_before_extension() {
+        let ext: pirs_agent::events::BeforeToolCallHook =
+            Arc::new(|_, _, _| Some("ext-deny".into()));
+        let chained = chain_gate_with_extensions(
+            gate(),
+            Some(ext),
+            true,
+            pirs_tools::SafetyProfile::Plan,
+        )
+        .expect("chained");
+        // Gate runs first: danger blocked by gate, not ext.
+        assert_eq!(
+            chained("1", "danger", &serde_json::json!({})).as_deref(),
+            Some("blocked by gate")
+        );
+        // Non-danger falls through to extension.
+        assert_eq!(
+            chained("1", "read", &serde_json::json!({})).as_deref(),
+            Some("ext-deny")
+        );
+    }
+
+    #[test]
+    fn pure_yolo_with_default_profile_keeps_extension_only() {
+        let ext: pirs_agent::events::BeforeToolCallHook =
+            Arc::new(|_, _, _| Some("ext-only".into()));
+        let chained = chain_gate_with_extensions(
+            gate(),
+            Some(ext),
+            true,
+            pirs_tools::SafetyProfile::Default,
+        )
+        .expect("ext only");
+        // Gate must not run under pure yolo.
+        assert_eq!(
+            chained("1", "danger", &serde_json::json!({})).as_deref(),
+            Some("ext-only")
         );
     }
 }
