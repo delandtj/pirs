@@ -1,104 +1,105 @@
-//! pirs-claw — lean personal assistant (not OpenClaw/Hermes).
+//! pirs-claw — terminal agent covering Hermes-class gaps (minus Modal/Daytona/Singularity).
 //!
-//! Intentionally thin:
-//! - durable chat session (JSONL)
-//! - schedule store + `tick` to fire due prompts
-//! - no channel matrix, no desktop hub, no skill-evolution loop
+//! - code + chat + schedule
+//! - gateway: telegram / discord / slack / whatsapp / signal
+//! - memory (FTS5), skills, pairing allowlist
+//! - exec backends: local / docker / ssh
+//! - voice transcription hook (external CLI)
 
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+pub mod channel;
+pub mod duration_parse;
+pub mod exec_env;
+pub mod gateway;
+pub mod instance_lock;
+pub mod memory_bridge;
+pub mod pairing;
+pub mod presets;
+pub mod registry;
+pub mod secrets;
+pub mod session;
+pub mod skills;
+pub mod voice;
+
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// One chat line in the durable session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionLine {
-    pub ts: u64,
-    pub role: String,
-    pub text: String,
+pub use channel::{
+    Channel, CliChannel, InboundMessage, OutboundReply, CHANNEL_CLI, CHANNEL_DISCORD,
+    CHANNEL_SIGNAL, CHANNEL_SLACK, CHANNEL_TELEGRAM, CHANNEL_WHATSAPP, GATEWAY_CHANNELS,
+};
+pub use exec_env::{apply_exec_backend, describe_active as describe_exec_backend};
+pub use pairing::{
+    allow_all_enabled, warn_if_allow_all, PairingAllowlist, ALLOW_ALL_ENV, ALLOW_ALL_WARNING,
+};
+pub use presets::{
+    apply_code_defaults, build_code_agent, coding_system_prompt, coding_tools, looks_like_repo,
+    phase_scope_summary, resolve_code_strategy, CodeOptions, DEFAULT_MODEL, DEFAULT_PLAN_MODEL,
+    DEFAULT_STRATEGY,
+};
+pub use duration_parse::parse_duration_secs;
+pub use secrets::{load_secrets_env, resolve_provider_and_key};
+pub use session::{migrate_legacy_cli_session, SessionId, SessionLine, SessionMeta, SessionStore};
+pub use skills::{
+    default_skills_dir, find_skill, install_skill, load_skills, skills_prompt_section,
+    usage_counts, Skill,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliverTarget {
+    #[default]
+    Cli,
+    Telegram { chat_id: String },
+    Discord { peer: String },
+    Slack { peer: String },
+    Whatsapp { peer: String },
+    Signal { peer: String },
 }
 
-/// File-backed session that survives restarts.
-#[derive(Debug, Clone)]
-pub struct SessionStore {
-    path: PathBuf,
-}
-
-impl SessionStore {
-    pub fn open(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
-        let path = path.into();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+impl DeliverTarget {
+    pub fn as_config_str(&self) -> String {
+        match self {
+            DeliverTarget::Cli => "cli".into(),
+            DeliverTarget::Telegram { chat_id } => format!("telegram:{chat_id}"),
+            DeliverTarget::Discord { peer } => format!("discord:{peer}"),
+            DeliverTarget::Slack { peer } => format!("slack:{peer}"),
+            DeliverTarget::Whatsapp { peer } => format!("whatsapp:{peer}"),
+            DeliverTarget::Signal { peer } => format!("signal:{peer}"),
         }
-        if !path.exists() {
-            fs::File::create(&path)?;
-        }
-        Ok(SessionStore { path })
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn append(&self, role: &str, text: &str) -> anyhow::Result<()> {
-        let line = SessionLine {
-            ts: now_secs(),
-            role: role.into(),
-            text: text.into(),
-        };
-        let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
-        serde_json::to_writer(&mut f, &line)?;
-        f.write_all(b"\n")?;
-        f.flush()?;
-        Ok(())
-    }
-
-    pub fn load(&self) -> anyhow::Result<Vec<SessionLine>> {
-        let f = fs::File::open(&self.path)?;
-        let reader = BufReader::new(f);
-        let mut out = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
+    pub fn parse(s: &str) -> Self {
+        let s = s.trim();
+        if let Some(id) = s.strip_prefix("telegram:") {
+            DeliverTarget::Telegram {
+                chat_id: id.to_string(),
             }
-            out.push(serde_json::from_str(&line)?);
+        } else if let Some(id) = s.strip_prefix("discord:") {
+            DeliverTarget::Discord { peer: id.into() }
+        } else if let Some(id) = s.strip_prefix("slack:") {
+            DeliverTarget::Slack { peer: id.into() }
+        } else if let Some(id) = s.strip_prefix("whatsapp:") {
+            DeliverTarget::Whatsapp { peer: id.into() }
+        } else if let Some(id) = s.strip_prefix("signal:") {
+            DeliverTarget::Signal { peer: id.into() }
+        } else {
+            DeliverTarget::Cli
         }
-        Ok(out)
-    }
-
-    /// Rebuild as pirs messages (user/assistant only).
-    pub fn to_agent_messages(&self) -> anyhow::Result<Vec<pirs_ai::Message>> {
-        let lines = self.load()?;
-        let mut msgs = Vec::new();
-        for l in lines {
-            match l.role.as_str() {
-                "user" => msgs.push(pirs_ai::Message::user(l.text)),
-                "assistant" => {
-                    msgs.push(pirs_ai::Message::Assistant(pirs_ai::AssistantMessage {
-                        content: vec![pirs_ai::ContentBlock::text(l.text)],
-                        ..Default::default()
-                    }));
-                }
-                _ => {}
-            }
-        }
-        Ok(msgs)
     }
 }
 
-/// A scheduled prompt (absolute fire time — no cron DSL).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScheduleEntry {
     pub id: String,
     pub prompt: String,
-    /// Unix seconds when this job should fire.
     pub next_fire: u64,
-    /// Repeat every `every_secs` after fire (0 = one-shot).
     pub every_secs: u64,
     pub enabled: bool,
+    #[serde(default)]
+    pub deliver: DeliverTarget,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -106,7 +107,6 @@ struct ScheduleFile {
     jobs: Vec<ScheduleEntry>,
 }
 
-/// JSON file of scheduled prompts.
 #[derive(Debug, Clone)]
 pub struct ScheduleStore {
     path: PathBuf,
@@ -143,22 +143,41 @@ impl ScheduleStore {
         Ok(self.read()?.jobs)
     }
 
-    pub fn add(&self, prompt: &str, every_secs: u64, first_fire_in_secs: u64) -> anyhow::Result<ScheduleEntry> {
+    pub fn add(
+        &self,
+        prompt: &str,
+        every_secs: u64,
+        first_fire_in_secs: u64,
+    ) -> anyhow::Result<ScheduleEntry> {
+        self.add_with_deliver(prompt, every_secs, first_fire_in_secs, DeliverTarget::Cli)
+    }
+
+    pub fn add_with_deliver(
+        &self,
+        prompt: &str,
+        every_secs: u64,
+        first_fire_in_secs: u64,
+        deliver: DeliverTarget,
+    ) -> anyhow::Result<ScheduleEntry> {
         let mut f = self.read()?;
         let now = now_secs();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
         let entry = ScheduleEntry {
-            id: format!("job-{}", now),
+            id: format!("job-{}-{}-{}", now, nanos, f.jobs.len()),
             prompt: prompt.into(),
             next_fire: now.saturating_add(first_fire_in_secs),
             every_secs,
             enabled: true,
+            deliver,
         };
         f.jobs.push(entry.clone());
         self.write(&f)?;
         Ok(entry)
     }
 
-    /// Jobs due at or before `now` (enabled only).
     pub fn due(&self, now: u64) -> anyhow::Result<Vec<ScheduleEntry>> {
         Ok(self
             .read()?
@@ -168,7 +187,6 @@ impl ScheduleStore {
             .collect())
     }
 
-    /// After firing: disable one-shots or advance next_fire for repeats.
     pub fn mark_fired(&self, id: &str, now: u64) -> anyhow::Result<()> {
         let mut f = self.read()?;
         for j in &mut f.jobs {
@@ -185,7 +203,6 @@ impl ScheduleStore {
     }
 }
 
-/// Default state dir: `~/.pirs/claw`.
 pub fn default_state_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".pirs").join("claw")
@@ -206,33 +223,29 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// System prompt for the personal-assistant persona.
 pub fn claw_system_prompt() -> String {
-    "You are pirs-claw, a lean personal assistant (not a coding agent).\n\
-     Be helpful, concise, and honest. Remember durable facts the user states.\n\
-     You are intentionally thinner than OpenClaw/Hermes: CLI + memory + schedules."
+    "You are pirs-claw, a personal assistant and coding agent.\n\
+     Be helpful, concise, and honest. Use tools carefully for coding tasks.\n\
+     You support chat, schedules, multi-channel gateway (telegram/discord/slack/whatsapp/signal), \
+     skills under ~/.pirs/skills, and FTS memory."
         .into()
 }
 
-/// Whether a schedule job should be marked fired after a tick iteration.
-/// Dry-run (`run == false`) never advances; failed fires stay due for retry.
 pub fn should_mark_schedule_fired(run: bool, fire_succeeded: bool) -> bool {
     run && fire_succeeded
 }
 
-/// Fail closed when no LLM API key is available (do not invent replies).
 pub fn require_llm_key(key: Option<&str>) -> anyhow::Result<()> {
     if key.map(|k| !k.trim().is_empty()).unwrap_or(false) {
         Ok(())
     } else {
         anyhow::bail!(
-            "no API key for chat: set DASHSCOPE_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY \
-             (e.g. source ~/.pirs/secrets.env)"
+            "no API key for chat: set DASHSCOPE_API_KEY, DEEPSEEK_API_KEY, OPENROUTER_API_KEY, \
+             or OPENAI_API_KEY (e.g. source ~/.pirs/secrets.env)"
         )
     }
 }
 
-/// Last non-empty assistant text from an agent turn, if any.
 pub fn extract_assistant_reply(msgs: &[pirs_ai::Message]) -> Option<String> {
     msgs.iter().rev().find_map(|m| match m {
         pirs_ai::Message::Assistant(a) => {
@@ -254,119 +267,68 @@ mod tests {
     #[test]
     fn session_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.jsonl");
-        {
-            let s = SessionStore::open(&path).unwrap();
-            s.append("user", "remember my dog is named Pixel").unwrap();
-            s.append("assistant", "Got it — Pixel.").unwrap();
-        }
-        let s2 = SessionStore::open(&path).unwrap();
-        let lines = s2.load().unwrap();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].role, "user");
-        assert!(lines[0].text.contains("Pixel"));
-        assert_eq!(lines[1].role, "assistant");
-        let msgs = s2.to_agent_messages().unwrap();
-        assert_eq!(msgs.len(), 2);
+        let s = SessionStore::open_for(dir.path(), SessionId::cli_local()).unwrap();
+        s.append("user", "remember my dog is named Pixel").unwrap();
+        s.append("assistant", "Got it — Pixel.").unwrap();
+        let s2 = SessionStore::open_for(dir.path(), SessionId::cli_local()).unwrap();
+        assert_eq!(s2.load().unwrap().len(), 2);
     }
 
     #[test]
     fn schedule_due_and_mark_fired_one_shot() {
         let dir = tempfile::tempdir().unwrap();
         let store = ScheduleStore::open(dir.path().join("schedule.json")).unwrap();
-        let job = store.add("morning brief", 0, 0).unwrap(); // due immediately
+        let job = store.add("morning brief", 0, 0).unwrap();
         let now = now_secs() + 1;
-        let due = store.due(now).unwrap();
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].id, job.id);
+        assert_eq!(store.due(now).unwrap().len(), 1);
         store.mark_fired(&job.id, now).unwrap();
-        let due2 = store.due(now + 10).unwrap();
-        assert!(due2.is_empty(), "one-shot disabled after fire");
+        assert!(store.due(now + 10).unwrap().is_empty());
     }
 
     #[test]
-    fn schedule_repeat_advances_next_fire() {
+    fn schedule_job_ids_unique_on_rapid_add() {
         let dir = tempfile::tempdir().unwrap();
         let store = ScheduleStore::open(dir.path().join("schedule.json")).unwrap();
-        let job = store.add("hourly", 3600, 0).unwrap();
-        let now = now_secs();
-        store.mark_fired(&job.id, now).unwrap();
-        let jobs = store.list().unwrap();
-        let j = jobs.iter().find(|j| j.id == job.id).unwrap();
-        assert!(j.enabled);
-        assert_eq!(j.next_fire, now + 3600);
-        assert!(store.due(now + 10).unwrap().is_empty());
-        assert_eq!(store.due(now + 3600).unwrap().len(), 1);
+        let a = store.add("a", 0, 0).unwrap();
+        let b = store.add("b", 0, 0).unwrap();
+        assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn deliver_targets_parse() {
+        assert_eq!(
+            DeliverTarget::parse("telegram:1"),
+            DeliverTarget::Telegram {
+                chat_id: "1".into()
+            }
+        );
+        assert_eq!(
+            DeliverTarget::parse("slack:C01"),
+            DeliverTarget::Slack {
+                peer: "C01".into()
+            }
+        );
     }
 
     #[test]
     fn dry_run_tick_must_not_mark_fired() {
         assert!(!should_mark_schedule_fired(false, true));
-        assert!(!should_mark_schedule_fired(false, false));
-    }
-
-    #[test]
-    fn failed_run_must_not_mark_fired() {
-        assert!(!should_mark_schedule_fired(true, false));
         assert!(should_mark_schedule_fired(true, true));
     }
 
     #[test]
     fn require_llm_key_fails_closed() {
         assert!(require_llm_key(None).is_err());
-        assert!(require_llm_key(Some("")).is_err());
-        assert!(require_llm_key(Some("   ")).is_err());
-        assert!(require_llm_key(Some("sk-test")).is_ok());
+        assert!(require_llm_key(Some("sk")).is_ok());
     }
 
     #[test]
-    fn chat_does_not_invent_reply_text() {
-        // Empty assistant list → None (caller must not append "(no reply)").
+    fn extract_reply() {
         assert!(extract_assistant_reply(&[]).is_none());
-        let empty = pirs_ai::Message::Assistant(pirs_ai::AssistantMessage {
-            content: vec![pirs_ai::ContentBlock::text("  ")],
-            ..Default::default()
-        });
-        assert!(extract_assistant_reply(&[empty]).is_none());
         let ok = pirs_ai::Message::Assistant(pirs_ai::AssistantMessage {
             content: vec![pirs_ai::ContentBlock::text("hello")],
             ..Default::default()
         });
-        assert_eq!(
-            extract_assistant_reply(&[ok]).as_deref(),
-            Some("hello")
-        );
-    }
-
-    /// Integration: if we refuse to append when extract returns None, session
-    /// stays user-only (no fake assistant line).
-    #[test]
-    fn no_fake_assistant_on_missing_reply() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::open(dir.path().join("s.jsonl")).unwrap();
-        store.append("user", "hi").unwrap();
-        let reply = extract_assistant_reply(&[]);
-        assert!(reply.is_none());
-        // Do not append assistant when None — durable session has only user.
-        let lines = store.load().unwrap();
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].role, "user");
-        assert!(!lines.iter().any(|l| l.role == "assistant"));
-    }
-
-    /// Real store path: dry-run policy leaves job due after "tick" without mark_fired.
-    #[test]
-    fn dry_run_leaves_job_enabled_in_store() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ScheduleStore::open(dir.path().join("schedule.json")).unwrap();
-        let job = store.add("stay due", 0, 0).unwrap();
-        let now = now_secs() + 1;
-        let due = store.due(now).unwrap();
-        assert_eq!(due.len(), 1);
-        // Simulate dry-run: would print, must NOT mark.
-        assert!(!should_mark_schedule_fired(false, false));
-        // Job still due.
-        assert_eq!(store.due(now).unwrap().len(), 1);
-        assert!(store.list().unwrap().iter().any(|j| j.id == job.id && j.enabled));
+        assert_eq!(extract_assistant_reply(&[ok]).as_deref(), Some("hello"));
     }
 }

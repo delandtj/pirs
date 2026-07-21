@@ -1,0 +1,32 @@
+# User systemd unit for always-on Telegram gateway.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp scripts/pirs-claw-telegram.service ~/.config/systemd/user/
+#   # edit ExecStart path if not on PATH / not cargo-installed
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now pirs-claw-telegram.service
+#
+# Prerequisites:
+#   - TELEGRAM_BOT_TOKEN (or PIRS_TELEGRAM_BOT_TOKEN) in ~/.pirs/secrets.env
+#   - at least one peer: pirs-claw pair add <chat_id>
+#   - only one process per bot token (unit + flock enforce single instance)
+
+[Unit]
+Description=pirs-claw Telegram gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.pirs/secrets.env
+# Prefer release binary on PATH; override with full path if needed.
+ExecStart=pirs-claw serve --channel telegram
+Restart=on-failure
+RestartSec=5
+# Fail closed if secrets missing; do not start empty.
+# Kill gracefully so flock releases.
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

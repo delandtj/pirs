@@ -3,7 +3,7 @@ name = "pirs-claw"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Lean personal assistant control plane (OpenClaw/Hermes alternative)"
+description = "Terminal + gateway agent (Hermes-class gaps; no Modal/Daytona/Singularity)"
 
 [[bin]]
 name = "pirs-claw"
@@ -13,6 +13,7 @@ path = "src/main.rs"
 pirs-ai = { workspace = true }
 pirs-agent = { workspace = true }
 pirs-tools = { workspace = true }
+pirs-rhai = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
@@ -22,7 +23,18 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
+toml = { workspace = true }
+libc = "0.2"
 directories = "6"
 
 [dev-dependencies]
 tempfile = "3"
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio-util = { workspace = true }
+
+[[test]]
+name = "cli_delivery"
+path = "tests/cli_delivery.rs"

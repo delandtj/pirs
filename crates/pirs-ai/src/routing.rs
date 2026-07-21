@@ -75,12 +75,15 @@ struct BackendHandle {
     name: String,
 }
 
+/// Provider + optional key + static headers for one named backend (constructor input).
+type BackendParts = (Arc<dyn LlmProvider>, Option<String>, Vec<(String, String)>);
+
 impl RoutingProvider {
     pub fn new(
         default: Arc<dyn LlmProvider>,
         default_api_key: Option<String>,
         default_headers: Vec<(String, String)>,
-        backends: HashMap<String, (Arc<dyn LlmProvider>, Option<String>, Vec<(String, String)>)>,
+        backends: HashMap<String, BackendParts>,
         routes: Vec<ModelRoute>,
     ) -> Self {
         let mut handles = HashMap::new();
@@ -299,8 +302,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
+    type CaptureCall = (String, Option<String>, Vec<(String, String)>);
+
     struct CaptureProvider {
-        seen: Mutex<Vec<(String, Option<String>, Vec<(String, String)>)>>,
+        seen: Mutex<Vec<CaptureCall>>,
         label: String,
     }
 

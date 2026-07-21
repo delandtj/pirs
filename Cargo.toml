@@ -12,7 +12,6 @@ members = [
     "crates/pirs-lsp",
     "crates/pirs-bench",
     "crates/pirs-bench-runner",
-    "crates/pirs-work",
     "crates/pirs-claw",
 ]
 

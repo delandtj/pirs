@@ -71,32 +71,6 @@ impl ToolOutput {
     }
 }
 
-#[cfg(test)]
-mod tool_output_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn text_with_ui_keeps_model_content_and_ui_in_details() {
-        let out = ToolOutput::text_with_ui("short", Some("long full log\nline2".into()));
-        assert_eq!(out.model_text(), Some("short"));
-        assert_eq!(out.ui_text(), Some("long full log\nline2"));
-        // History path uses content only — must not equal the long UI string.
-        assert_ne!(out.model_text().unwrap(), out.ui_text().unwrap());
-        assert_eq!(
-            out.details.as_ref().unwrap().get("uiText").unwrap(),
-            &json!("long full log\nline2")
-        );
-    }
-
-    #[test]
-    fn text_without_ui_has_no_ui_text() {
-        let out = ToolOutput::text("only");
-        assert_eq!(out.model_text(), Some("only"));
-        assert!(out.ui_text().is_none());
-    }
-}
-
 pub struct ToolExecContext {
     pub tool_call_id: String,
     pub args: Value,
@@ -158,3 +132,30 @@ pub fn tool_defs(tools: &[std::sync::Arc<dyn AgentTool>]) -> Vec<pirs_ai::ToolDe
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tool_output_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn text_with_ui_keeps_model_content_and_ui_in_details() {
+        let out = ToolOutput::text_with_ui("short", Some("long full log\nline2".into()));
+        assert_eq!(out.model_text(), Some("short"));
+        assert_eq!(out.ui_text(), Some("long full log\nline2"));
+        // History path uses content only — must not equal the long UI string.
+        assert_ne!(out.model_text().unwrap(), out.ui_text().unwrap());
+        assert_eq!(
+            out.details.as_ref().unwrap().get("uiText").unwrap(),
+            &json!("long full log\nline2")
+        );
+    }
+
+    #[test]
+    fn text_without_ui_has_no_ui_text() {
+        let out = ToolOutput::text("only");
+        assert_eq!(out.model_text(), Some("only"));
+        assert!(out.ui_text().is_none());
+    }
+}
+

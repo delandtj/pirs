@@ -1,11 +1,15 @@
 # pirs
 
-Product entry points:
+**Two products** over one agent core — see [docs/PRODUCTS.md](docs/PRODUCTS.md):
 
-- **`pirs`** — full harness (REPL/TUI/strategies/registry/bench)
-- **`pirs-work`** — coding agent (Claude/Codex/Qoder/Kimi-class); see [docs/pirs-work.md](docs/pirs-work.md)
-- **`pirs-claw`** — lean personal assistant (vs OpenClaw/Hermes); see [docs/pirs-claw.md](docs/pirs-claw.md)
-- Shrimp lessons: [docs/shrimp-transfer.md](docs/shrimp-transfer.md)
+| Product | Binary | Role |
+|---------|--------|------|
+| **Harness** | **`pirs`** | Multi-model strategies, registry, `--weak`, TUI/RPC/ACP (peers: **pi**) |
+| **Agent** | **`pirs-claw`** | Daily agent: **repo work + chat + schedules + gateway** (telegram/discord/slack/whatsapp/signal); exec local/docker/ssh. Hermes gaps covered except Modal/Daytona/Singularity. |
+
+Power tools (not separate products): `pirs-bench`, `pirs-orchestrator`.
+
+Also: [docs/PRODUCTS.md](docs/PRODUCTS.md) · [docs/pirs-claw.md](docs/pirs-claw.md) · [docs/shrimp-transfer.md](docs/shrimp-transfer.md)
 
 A Rust port of the [pi agent harness](https://github.com/earendil-works/pi): an OpenAI-compatible coding agent with a streaming agent loop, built-in coding tools, [rhai](https://rhai.rs)-script extensibility, a headless RPC mode, and a multi-instance orchestrator.
 

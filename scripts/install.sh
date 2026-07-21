@@ -1,6 +1,9 @@
 #!/bin/sh
 # pirs installer: detects platform, downloads the latest release from GitHub.
 # Usage: curl -fsSL https://raw.githubusercontent.com/xmonader/pirs/main/scripts/install.sh | sh
+#
+# Installs: pirs (harness), pirs-claw (agent), pirs-orchestrator (fleet).
+# Override install dir: PIRS_INSTALL_DIR=~/bin
 set -eu
 
 REPO="xmonader/pirs"
@@ -32,7 +35,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 curl -fsSL "$URL" -o "$TMP/pirs-bundle.tar.gz"
 tar -xzf "$TMP/pirs-bundle.tar.gz" -C "$TMP"
-for bin in pirs pirs-orchestrator; do
+for bin in pirs pirs-claw pirs-orchestrator; do
   if [ -f "$TMP/$bin" ]; then
     install -m 755 "$TMP/$bin" "$INSTALL_DIR/$bin"
     echo "installed $bin -> $INSTALL_DIR/$bin"
@@ -43,4 +46,6 @@ case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) echo "note: add $INSTALL_DIR to your PATH" ;;
 esac
-echo "done. run: pirs --mode tui"
+echo "done."
+echo "  harness: pirs --mode tui"
+echo "  agent:   pirs-claw chat \"…\"  |  pirs-claw serve --channel telegram"

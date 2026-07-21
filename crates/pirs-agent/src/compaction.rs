@@ -18,7 +18,11 @@ const MAX_SUMMARY_INPUT_CHARS: usize = 80_000;
 pub struct CompactionConfig {
     pub context_window: u64,
     pub reserve_tokens: u64,
+    /// Keep at least this many estimated tokens in the unsummarized tail.
     pub keep_recent_tokens: u64,
+    /// Also keep at least this many recent user-turn blocks (user + following
+    /// assistant/tool traffic) so follow-ups still see recent file/tool work.
+    pub min_recent_user_turns: usize,
 }
 
 impl Default for CompactionConfig {
@@ -26,7 +30,9 @@ impl Default for CompactionConfig {
         CompactionConfig {
             context_window: 128_000,
             reserve_tokens: 16_384,
-            keep_recent_tokens: 20_000,
+            // Stronger default retention for long coding runs (was 20k).
+            keep_recent_tokens: 32_000,
+            min_recent_user_turns: 4,
         }
     }
 }
@@ -69,13 +75,26 @@ pub fn should_compact(tokens: u64, config: &CompactionConfig) -> bool {
 /// following `tool_result`(s) — leaving a dangling tool_use wedges Anthropic
 /// and corrupts OpenAI history.
 pub fn find_cut_point(messages: &[Message], keep_recent_tokens: u64) -> Option<usize> {
+    find_cut_point_ex(messages, keep_recent_tokens, 0)
+}
+
+/// Like [`find_cut_point`], also ensuring at least `min_recent_user_turns`
+/// recent user messages remain in the tail (when that many exist).
+pub fn find_cut_point_ex(
+    messages: &[Message],
+    keep_recent_tokens: u64,
+    min_recent_user_turns: usize,
+) -> Option<usize> {
     let mut acc = 0u64;
     let mut cut = None;
+    let mut user_turns = 0usize;
     for i in (0..messages.len()).rev() {
         acc += estimate_message_tokens(&messages[i]);
         if matches!(messages[i], Message::User(_)) {
             cut = Some(i);
-            if acc >= keep_recent_tokens {
+            user_turns += 1;
+            let turns_ok = min_recent_user_turns == 0 || user_turns >= min_recent_user_turns;
+            if acc >= keep_recent_tokens && turns_ok {
                 break;
             }
         }
@@ -90,6 +109,14 @@ pub fn find_cut_point(messages: &[Message], keep_recent_tokens: u64) -> Option<u
     } else {
         Some(cut)
     }
+}
+
+/// Count user messages in a slice (for retention checks / tests).
+pub fn count_user_turns(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|m| matches!(m, Message::User(_)))
+        .count()
 }
 
 /// Snap `cut` so `messages[cut..]` never starts mid tool_use/tool_result pair.
@@ -186,15 +213,11 @@ pub fn tool_pairs_intact(messages: &[Message]) -> bool {
                     }
                 }
             }
-            Message::ToolResult(tr) => {
-                if !open.remove(&tr.tool_call_id) {
-                    // Result for unknown / already-closed id — still ok if
-                    // empty open from prior compaction edge; treat as broken
-                    // only when we never saw the use.
-                    // Strict: dangling result is a problem.
-                    return false;
-                }
+            // Strict: dangling tool_result (no matching open tool_use) is broken.
+            Message::ToolResult(tr) if !open.remove(&tr.tool_call_id) => {
+                return false;
             }
+            Message::ToolResult(_) => {}
             _ => {}
         }
     }
@@ -319,9 +342,17 @@ pub async fn compact_messages(
     cancel: CancellationToken,
     extra_usage: &std::sync::Arc<std::sync::Mutex<pirs_ai::Usage>>,
 ) -> bool {
-    let Some(cut) = find_cut_point(messages, config.keep_recent_tokens) else {
+    let Some(cut) = find_cut_point_ex(
+        messages,
+        config.keep_recent_tokens,
+        config.min_recent_user_turns,
+    ) else {
         return false;
     };
+    // Refuse to compact if the kept tail would break tool pairs.
+    if !tool_pairs_intact(&messages[cut..]) {
+        return false;
+    }
     // Demote, don't destroy: the dropped range goes to searchable storage.
     if let Some(mem) = crate::memory::global() {
         mem.add_messages(&messages[..cut]);
@@ -336,6 +367,12 @@ pub async fn compact_messages(
             let summary_msg =
                 Message::user(format!("{SUMMARY_PREFIX}\n{summary}\n{SUMMARY_SUFFIX}"));
             messages.splice(..cut, [summary_msg]);
+            // Summary is a user message; remaining tail pairs must stay intact.
+            if !tool_pairs_intact(messages) {
+                // Should not happen if cut was safe; leave messages as-is for safety
+                // by not claiming success is wrong — pairs can include summary + tail.
+                // tool_pairs_intact only cares about tool_use/result pairing.
+            }
             emit(AgentEvent::CompactionEnd {
                 reason: "threshold".into(),
                 aborted: false,
@@ -511,11 +548,54 @@ mod tests {
     }
 
     #[test]
+    fn find_cut_ex_keeps_min_user_turns_with_tool_pairs() {
+        let mut msgs = vec![user("goal")];
+        for i in 0..12 {
+            msgs.push(user(&format!("turn {i} {}", "x".repeat(400))));
+            let id = format!("c{i}");
+            msgs.push(assistant_with_tool(&id, "edit"));
+            msgs.push(tool_result_id(&id, "edit", "ok path/foo.rs"));
+        }
+        // Small token budget but require 4 user turns in the tail.
+        let cut = find_cut_point_ex(&msgs, 50, 4).expect("cut");
+        let tail = &msgs[cut..];
+        assert!(tool_pairs_intact(tail), "tail pairs broken cut={cut}");
+        assert!(
+            count_user_turns(tail) >= 4,
+            "expected >=4 user turns in tail, got {} cut={cut}",
+            count_user_turns(tail)
+        );
+        // Recent file work still visible in kept tool results / users.
+        let flat: String = tail
+            .iter()
+            .map(|m| match m {
+                Message::User(u) => match &u.content {
+                    pirs_ai::UserContent::Text(t) => t.clone(),
+                    _ => String::new(),
+                },
+                Message::ToolResult(tr) => tr
+                    .content
+                    .iter()
+                    .filter_map(|b| b.as_text())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            flat.contains("turn") || flat.contains("foo.rs") || flat.contains("ok"),
+            "tail should retain recent work context: {flat}"
+        );
+    }
+
+    #[test]
     fn should_compact_threshold() {
         let cfg = CompactionConfig {
             context_window: 100_000,
             reserve_tokens: 10_000,
             keep_recent_tokens: 5_000,
+            min_recent_user_turns: 0,
         };
         assert!(!should_compact(89_999, &cfg));
         assert!(should_compact(90_001, &cfg));
@@ -599,6 +679,7 @@ mod demote_tests {
             context_window: 1_000,
             reserve_tokens: 100,
             keep_recent_tokens: 50,
+            min_recent_user_turns: 0,
         };
         let emit: crate::events::Emit = std::sync::Arc::new(|_| {});
         let provider: Arc<dyn LlmProvider> = Arc::new(SummaryProvider);

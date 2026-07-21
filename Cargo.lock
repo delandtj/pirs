@@ -1804,14 +1804,19 @@ dependencies = [
  "async-trait",
  "clap",
  "directories",
+ "futures",
+ "libc",
  "pirs-agent",
  "pirs-ai",
+ "pirs-rhai",
  "pirs-tools",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1938,27 +1943,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "unicode-normalization",
-]
-
-[[package]]
-name = "pirs-work"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "futures",
- "pirs-agent",
- "pirs-ai",
- "pirs-rhai",
- "pirs-tools",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

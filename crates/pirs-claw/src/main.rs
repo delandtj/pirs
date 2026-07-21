@@ -1,65 +1,165 @@
-//! pirs-claw — lean personal assistant CLI.
+//! pirs-claw — Hermes-class agent (local/docker/ssh; multi-channel gateway).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use pirs_ai::OpenAiCompat;
+use pirs_agent::phase_agent::AgentPhaseDriver;
+use pirs_agent::strategy::{run_strategy_async, PhaseReq, Task, ToolScope};
 use pirs_agent::Agent;
+use pirs_claw::channel::{Channel, CliChannel, InboundMessage, OutboundReply, GATEWAY_CHANNELS};
+use pirs_claw::memory_bridge;
+use pirs_claw::pairing::PairingAllowlist;
+use pirs_claw::presets::{
+    apply_code_defaults, build_code_agent, coding_system_prompt, coding_tools, looks_like_repo,
+    resolve_code_strategy, CodeOptions, DEFAULT_MODEL, DEFAULT_PLAN_MODEL, DEFAULT_STRATEGY,
+};
+use pirs_claw::registry;
+use pirs_claw::skills::{default_skills_dir, find_skill, install_skill, load_skills, skills_prompt_section, usage_counts};
+use pirs_claw::parse_duration_secs;
 use pirs_claw::{
-    claw_system_prompt, default_schedule_path, default_session_path, extract_assistant_reply,
-    require_llm_key, should_mark_schedule_fired, ScheduleStore, SessionStore,
+    apply_exec_backend, claw_system_prompt, default_state_dir, describe_exec_backend,
+    extract_assistant_reply, load_secrets_env, require_llm_key,
+    should_mark_schedule_fired, DeliverTarget, ScheduleStore, SessionId, SessionStore,
 };
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(
     name = "pirs-claw",
-    about = "Lean personal assistant (OpenClaw/Hermes alternative): chat + memory + schedules. No channel zoo."
+    about = "Agent: code + chat + schedule + gateway (telegram/discord/slack/whatsapp/signal). Exec: local|docker|ssh.",
+    long_about = "Hermes-class personal agent over the pirs core.\n\
+                  \n\
+                  Coding:  pirs-claw -C ~/repo \"fix tests\"\n\
+                  Chat:    pirs-claw chat \"…\"\n\
+                  Schedule: pirs-claw schedule tick --run\n\
+                  Gateway: pirs-claw serve --channel telegram\n\
+                  Exec:    --exec local|docker|docker:<image>|docker@ctr|ssh:user@host\n\
+                  \n\
+                  Not supported (by design): Modal, Daytona, Singularity.\n\
+                  Harness TUI: pirs --mode tui …"
 )]
 struct Cli {
     #[arg(long, global = true)]
     state_dir: Option<PathBuf>,
 
-    #[arg(long, global = true, default_value = "qwen3.5-plus")]
+    #[arg(long, short = 'C', global = true)]
+    cwd: Option<PathBuf>,
+
+    #[arg(long, global = true, default_value = DEFAULT_MODEL)]
     model: String,
 
+    #[arg(long, global = true, default_value = DEFAULT_PLAN_MODEL)]
+    plan_model: String,
+
+    #[arg(long, global = true, default_value = DEFAULT_STRATEGY)]
+    strategy: String,
+
+    #[arg(long, global = true)]
+    max_turns: Option<usize>,
+
+    #[arg(long, global = true)]
+    sequential: bool,
+
+    #[arg(long, global = true)]
+    weak: bool,
+
+    /// Shell backend: local | docker | docker:<image> | docker@container | ssh:user@host
+    #[arg(long, global = true, default_value = "local")]
+    exec: String,
+
+    /// Extra skills directory (default also loads ~/.pirs/skills).
+    #[arg(long, global = true)]
+    skills_dir: Option<PathBuf>,
+
+    /// Allow coding tools on gateway messages (default: chat-only tools off for safety).
+    #[arg(long, global = true)]
+    gateway_code: bool,
+
     #[command(subcommand)]
-    cmd: Commands,
+    cmd: Option<Commands>,
+
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    prompt: Vec<String>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum Commands {
-    /// One-shot chat (appends to durable session).
-    Chat {
-        /// User message.
-        message: Vec<String>,
-    },
-    /// Print session history.
+    Code { prompt: Vec<String> },
+    Chat { message: Vec<String> },
     History {
         #[arg(long, default_value_t = 20)]
         last: usize,
     },
-    /// Schedule management.
+    /// Search FTS memory.
+    Recall {
+        query: Vec<String>,
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+    },
+    /// Skills manager (list / show / add / usage).
+    Skills {
+        #[command(subcommand)]
+        cmd: Option<SkillsCmd>,
+    },
+    /// List multi-key sessions under state dir.
+    Sessions,
+    /// Transcribe audio file via external whisper CLI if available.
+    Transcribe {
+        path: PathBuf,
+    },
     Schedule {
         #[command(subcommand)]
         cmd: ScheduleCmd,
     },
+    /// Multi-channel gateway (Hermes messaging gap).
+    Serve {
+        #[arg(long, default_value = "telegram")]
+        channel: String,
+    },
+    /// Manage gateway pairing allowlist (add/list/remove peers).
+    Pair {
+        #[command(subcommand)]
+        cmd: PairCmd,
+    },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
+enum PairCmd {
+    /// List allowlisted peer ids.
+    List,
+    /// Add a peer id (telegram chat_id, etc.).
+    Add { peer: String },
+    /// Remove a peer id.
+    Remove { peer: String },
+}
+
+#[derive(Subcommand, Debug)]
+enum SkillsCmd {
+    /// List installed skills (default).
+    List,
+    /// Show one skill body.
+    Show { name: String },
+    /// Install a skill file or directory into ~/.pirs/skills.
+    Add { path: PathBuf },
+    /// Show skill usage counts.
+    Usage,
+}
+
+#[derive(Subcommand, Debug)]
 enum ScheduleCmd {
-    /// Add a job. Fires after `in_secs`, optionally every `every` seconds.
     Add {
         prompt: Vec<String>,
-        #[arg(long, default_value_t = 0)]
-        in_secs: u64,
-        #[arg(long, default_value_t = 0)]
-        every: u64,
+        /// Delay before first fire: seconds or 30s/5m/2h/1d
+        #[arg(long = "in", default_value = "0")]
+        in_dur: String,
+        /// Repeat interval: seconds or 30s/5m/2h/1d (0 = one-shot)
+        #[arg(long = "every", default_value = "0")]
+        every_dur: String,
+        #[arg(long, default_value = "cli")]
+        deliver: String,
     },
     List,
-    /// Fire all due jobs once (no daemon). Prints prompts that would run / runs them.
     Tick {
-        /// Actually call the model for due jobs (default: dry-run print only).
         #[arg(long)]
         run: bool,
     },
@@ -75,92 +175,214 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    load_secrets_env_best_effort();
+    load_secrets_env();
+    apply_exec_backend(&cli.exec)?;
 
-    let state = cli
-        .state_dir
-        .clone()
-        .unwrap_or_else(pirs_claw::default_state_dir);
+    let state = cli.state_dir.clone().unwrap_or_else(default_state_dir);
     std::fs::create_dir_all(&state)?;
-    let session_path = state.join("session.jsonl");
     let schedule_path = state.join("schedule.json");
-    // Prefer explicit paths when using defaults for docs consistency.
-    let _ = (default_session_path(), default_schedule_path());
+    let cwd = cli
+        .cwd
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let sequential = cli.sequential || cli.weak;
+    let max_turns = cli.max_turns.or(Some(if cli.weak { 60 } else { 40 }));
+    let skills = load_all_skills(cli.skills_dir.as_deref());
 
     match cli.cmd {
-        Commands::Chat { message } => {
+        Some(Commands::Pair { cmd }) => {
+            let path = PairingAllowlist::default_path(&state);
+            let mut al = PairingAllowlist::open(&path)?;
+            match cmd {
+                PairCmd::List => {
+                    let peers = al.list();
+                    if peers.is_empty() {
+                        println!("(empty allowlist at {})", path.display());
+                    } else {
+                        for p in peers {
+                            println!("{p}");
+                        }
+                    }
+                }
+                PairCmd::Add { peer } => {
+                    let added = al.add(&path, &peer)?;
+                    if added {
+                        println!("paired {peer} → {}", path.display());
+                    } else {
+                        println!("already paired: {peer}");
+                    }
+                }
+                PairCmd::Remove { peer } => {
+                    let removed = al.remove(&path, &peer)?;
+                    if removed {
+                        println!("unpaired {peer}");
+                    } else {
+                        println!("not in allowlist: {peer}");
+                    }
+                }
+            }
+        }
+        Some(Commands::Serve { channel }) => {
+            let allow_path = PairingAllowlist::default_path(&state);
+            let allowlist = PairingAllowlist::open(&allow_path)?;
+            let model = cli.model.clone();
+            let state_c = state.clone();
+            let cwd_c = cwd.clone();
+            let skills_c = skills.clone();
+            let gateway_code = cli.gateway_code;
+            let ch = channel.clone();
+            pirs_claw::gateway::run_gateway(
+                &ch,
+                &state,
+                &allowlist,
+                move |inbound| {
+                    let model = model.clone();
+                    let state_c = state_c.clone();
+                    let cwd_c = cwd_c.clone();
+                    let skills_c = skills_c.clone();
+                    Box::pin(async move {
+                        handle_gateway_message(
+                            &state_c,
+                            &cwd_c,
+                            &model,
+                            &inbound,
+                            &skills_c,
+                            gateway_code,
+                        )
+                        .await
+                    })
+                },
+            )
+            .await?;
+        }
+        Some(Commands::Code { prompt }) => {
+            let text = prompt.join(" ");
+            if text.is_empty() {
+                anyhow::bail!("usage: pirs-claw code <prompt…>");
+            }
+            run_code(
+                &cwd,
+                &cli.model,
+                &cli.plan_model,
+                &cli.strategy,
+                &text,
+                max_turns,
+                sequential,
+                &skills,
+            )
+            .await?;
+        }
+        Some(Commands::Chat { message }) => {
             let text = message.join(" ");
             if text.is_empty() {
                 anyhow::bail!("usage: pirs-claw chat <message>");
             }
-            let (base, key) = resolve_provider_and_key();
-            // Fail before touching durable session if we cannot call an LLM.
-            require_llm_key(key.as_deref())?;
-
-            let store = SessionStore::open(&session_path)?;
-            store.append("user", &text)?;
-
-            let provider = Arc::new(OpenAiCompat::new(base).with_max_retries(2));
-            let completion = pirs_ai::CompletionOptions {
-                api_key: key,
-                ..Default::default()
-            };
-            let mut agent = Agent::new(provider, &cli.model)
-                .with_system_prompt(claw_system_prompt())
-                .with_tools(pirs_tools::default_tools(std::env::current_dir()?))
-                .with_completion(completion);
-            // Hydrate prior session (skip last user we just appended — prompt adds it).
-            let prior = store.load()?;
-            if prior.len() > 1 {
-                let mut msgs = store.to_agent_messages()?;
-                if let Some(pirs_ai::Message::User(_)) = msgs.last() {
-                    msgs.pop(); // current prompt
-                }
-                agent.messages = msgs;
-            }
-
-            let new_msgs = match agent.prompt(&text).await {
-                Ok(m) => m,
-                Err(e) => {
-                    // Leave user line in session for continuity; never invent assistant text.
-                    anyhow::bail!("agent error (no assistant reply recorded): {e}");
-                }
-            };
-            let Some(reply) = extract_assistant_reply(&new_msgs) else {
-                anyhow::bail!("empty assistant reply (nothing recorded as assistant)");
-            };
-            store.append("assistant", &reply)?;
-            println!("{reply}");
-            eprintln!("[pirs-claw: session {}]", store.path().display());
+            run_chat(&state, &cli.model, &cwd, &text, &skills).await?;
         }
-        Commands::History { last } => {
-            let store = SessionStore::open(&session_path)?;
+        Some(Commands::History { last }) => {
+            let store = SessionStore::open_for(&state, SessionId::cli_local())?;
             let lines = store.load()?;
             let start = lines.len().saturating_sub(last);
             for l in &lines[start..] {
                 println!("[{}] {}: {}", l.ts, l.role, l.text);
             }
         }
-        Commands::Schedule { cmd } => {
+        Some(Commands::Recall { query, limit }) => {
+            let q = query.join(" ");
+            let mem = memory_bridge::open_memory(&state)?;
+            let ctx = memory_bridge::recall_context(&mem, &q, limit);
+            if ctx.is_empty() {
+                println!("(no memory hits for {q:?})");
+            } else {
+                print!("{ctx}");
+            }
+        }
+        Some(Commands::Skills { cmd }) => {
+            let cmd = cmd.unwrap_or(SkillsCmd::List);
+            match cmd {
+                SkillsCmd::List => {
+                    if skills.is_empty() {
+                        println!(
+                            "(no skills under {} — use: pirs-claw skills add <path>)",
+                            default_skills_dir().display()
+                        );
+                    }
+                    for s in &skills {
+                        println!("{} — {} ({})", s.name, s.description, s.path.display());
+                    }
+                }
+                SkillsCmd::Show { name } => {
+                    match find_skill(&skills, &name) {
+                        Some(s) => {
+                            println!("# {}\n{}\n\n{}", s.name, s.description, s.body);
+                        }
+                        None => anyhow::bail!("unknown skill {name:?}"),
+                    }
+                }
+                SkillsCmd::Add { path } => {
+                    let dest = install_skill(&path, &default_skills_dir())?;
+                    println!("installed → {}", dest.display());
+                }
+                SkillsCmd::Usage => {
+                    let u = usage_counts();
+                    if u.is_empty() {
+                        println!("(no usage recorded yet)");
+                    }
+                    for (k, v) in u {
+                        println!("{k}\t{v}");
+                    }
+                }
+            }
+        }
+        Some(Commands::Sessions) => {
+            let root = state.join("sessions");
+            if !root.is_dir() {
+                println!("(no sessions under {})", root.display());
+            } else {
+                for ent in walkdir_sessions(&root) {
+                    println!("{ent}");
+                }
+            }
+        }
+        Some(Commands::Transcribe { path }) => match pirs_claw::voice::transcribe_audio(&path)? {
+            Some(t) => println!("{t}"),
+            None => anyhow::bail!(
+                "no transcription (install whisper or set PIRS_CLAW_TRANSCRIBE_CMD with {{path}})"
+            ),
+        },
+        Some(Commands::Schedule { cmd }) => {
             let store = ScheduleStore::open(&schedule_path)?;
             match cmd {
                 ScheduleCmd::Add {
                     prompt,
-                    in_secs,
-                    every,
+                    in_dur,
+                    every_dur,
+                    deliver,
                 } => {
                     let p = prompt.join(" ");
-                    let e = store.add(&p, every, in_secs)?;
+                    let in_secs = parse_duration_secs(&in_dur)?;
+                    let every = parse_duration_secs(&every_dur)?;
+                    let deliver = DeliverTarget::parse(&deliver);
+                    let e = store.add_with_deliver(&p, every, in_secs, deliver)?;
                     println!(
-                        "scheduled {} next_fire={} every_secs={}",
-                        e.id, e.next_fire, e.every_secs
+                        "scheduled {} next_fire={} every_secs={} deliver={}",
+                        e.id,
+                        e.next_fire,
+                        e.every_secs,
+                        e.deliver.as_config_str()
                     );
                 }
                 ScheduleCmd::List => {
                     for j in store.list()? {
                         println!(
-                            "{} enabled={} next={} every={} | {}",
-                            j.id, j.enabled, j.next_fire, j.every_secs, j.prompt
+                            "{} enabled={} next={} every={} deliver={} | {}",
+                            j.id,
+                            j.enabled,
+                            j.next_fire,
+                            j.every_secs,
+                            j.deliver.as_config_str(),
+                            j.prompt
                         );
                     }
                 }
@@ -173,101 +395,399 @@ async fn main() -> anyhow::Result<()> {
                     if due.is_empty() {
                         println!("no due jobs");
                     }
+                    let mut ok_n = 0u32;
+                    let mut fail_n = 0u32;
                     for j in due {
-                        println!("due {}: {}", j.id, j.prompt);
+                        println!(
+                            "due {} deliver={}: {}",
+                            j.id,
+                            j.deliver.as_config_str(),
+                            j.prompt
+                        );
                         let fire_ok = if run {
-                            // Re-enter chat path for the job prompt.
-                            let status = std::process::Command::new(std::env::current_exe()?)
+                            // Run chat in-process path via subprocess; capture stdout as reply.
+                            let out = std::process::Command::new(std::env::current_exe()?)
                                 .arg("--model")
                                 .arg(&cli.model)
                                 .arg("--state-dir")
                                 .arg(&state)
                                 .arg("chat")
                                 .arg(&j.prompt)
-                                .status()?;
-                            if status.success() {
-                                true
-                            } else {
+                                .output()?;
+                            if !out.status.success() {
                                 eprintln!(
-                                    "[tick] job {} failed (exit {:?}); leaving enabled for retry",
+                                    "[tick] job {} chat failed: {}",
                                     j.id,
-                                    status.code()
+                                    String::from_utf8_lossy(&out.stderr)
                                 );
                                 false
+                            } else {
+                                // Child stdout is *captured* (not inherited), so the reply is
+                                // never visible unless we re-surface it. Always deliver —
+                                // including DeliverTarget::Cli which println!'s the text.
+                                let reply = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                                if let Err(e) =
+                                    pirs_claw::gateway::deliver_outbound(&j.deliver, &reply).await
+                                {
+                                    eprintln!(
+                                        "[tick] job {} deliver {} failed: {e}",
+                                        j.id,
+                                        j.deliver.as_config_str()
+                                    );
+                                    false
+                                } else {
+                                    true
+                                }
                             }
                         } else {
-                            // Dry-run: print only — do not advance schedule.
                             false
                         };
                         if should_mark_schedule_fired(run, fire_ok) {
                             store.mark_fired(&j.id, now)?;
+                            ok_n += 1;
+                        } else if run {
+                            fail_n += 1;
                         }
                     }
+                    if run {
+                        println!(
+                            "[tick summary] ok={ok_n} failed={fail_n} (failed jobs stay due for retry)"
+                        );
+                    }
                 }
+            }
+        }
+        None => {
+            let text = cli.prompt.join(" ");
+            if text.is_empty() {
+                print_usage();
+                std::process::exit(2);
+            }
+            if cli.cwd.is_some() || looks_like_repo(&cwd) {
+                run_code(
+                    &cwd,
+                    &cli.model,
+                    &cli.plan_model,
+                    &cli.strategy,
+                    &text,
+                    max_turns,
+                    sequential,
+                    &skills,
+                )
+                .await?;
+            } else {
+                run_chat(&state, &cli.model, &cwd, &text, &skills).await?;
             }
         }
     }
     Ok(())
 }
 
-fn resolve_provider_and_key() -> (Option<String>, Option<String>) {
-    if let Ok(base) = std::env::var("OPENAI_BASE_URL") {
-        let key = std::env::var("OPENAI_API_KEY")
-            .ok()
-            .or_else(|| std::env::var("DASHSCOPE_API_KEY").ok())
-            .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok());
-        return (Some(base), key);
+fn load_all_skills(extra: Option<&Path>) -> Vec<pirs_claw::Skill> {
+    let mut skills = load_skills(&default_skills_dir());
+    if let Some(d) = extra {
+        skills.extend(load_skills(d));
     }
-    if std::env::var("DASHSCOPE_API_KEY").is_ok() {
-        return (
-            Some("https://coding-intl.dashscope.aliyuncs.com/v1".into()),
-            std::env::var("DASHSCOPE_API_KEY").ok(),
-        );
-    }
-    if std::env::var("DEEPSEEK_API_KEY").is_ok() {
-        return (
-            Some("https://api.deepseek.com/v1".into()),
-            std::env::var("DEEPSEEK_API_KEY").ok(),
-        );
-    }
-    (
-        None,
-        std::env::var("OPENAI_API_KEY").ok(),
-    )
+    skills
 }
 
-fn load_secrets_env_best_effort() {
-    let Some(home) = std::env::var_os("HOME") else {
-        return;
+fn walkdir_sessions(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(channels) = std::fs::read_dir(root) else {
+        return out;
     };
-    let path = PathBuf::from(home).join(".pirs").join("secrets.env");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    for ch in channels.flatten() {
+        if !ch.path().is_dir() {
             continue;
         }
-        let body = line.strip_prefix("export ").unwrap_or(line);
-        let Some((k, v)) = body.split_once('=') else {
+        let channel = ch.file_name().to_string_lossy().into_owned();
+        let Ok(peers) = std::fs::read_dir(ch.path()) else {
             continue;
         };
-        let k = k.trim();
-        if std::env::var_os(k).is_some() {
-            continue;
-        }
-        let mut v = v.trim().to_string();
-        if (v.starts_with('\'') && v.ends_with('\'')) || (v.starts_with('"') && v.ends_with('"')) {
-            v = v[1..v.len() - 1].to_string();
-        }
-        if v.starts_with("${") && v.ends_with('}') {
-            let refn = &v[2..v.len() - 1];
-            v = std::env::var(refn).unwrap_or_default();
-            if v.is_empty() {
+        for pe in peers.flatten() {
+            let name = pe.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".jsonl") {
                 continue;
             }
+            let peer = name.trim_end_matches(".jsonl");
+            let meta_path = pe.path().with_file_name(format!("{peer}.meta.json"));
+            let extra = std::fs::read_to_string(&meta_path)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .map(|v| {
+                    format!(
+                        " msgs={} last={}",
+                        v.get("message_count").and_then(|x| x.as_u64()).unwrap_or(0),
+                        v.get("last_active").and_then(|x| x.as_u64()).unwrap_or(0)
+                    )
+                })
+                .unwrap_or_default();
+            out.push(format!("{channel}/{peer}{extra}"));
         }
-        std::env::set_var(k, v);
     }
+    out.sort();
+    out
+}
+
+fn print_usage() {
+    eprintln!(
+        "pirs-claw — code + chat + schedule + gateway\n\
+         \n\
+         pirs-claw -C <repo> \"fix …\"\n\
+         pirs-claw chat \"…\"\n\
+         pirs-claw recall \"keyword\"\n\
+         pirs-claw sessions\n\
+         pirs-claw skills list|show|add|usage\n\
+         pirs-claw schedule add --in 5m --every 1h \"…\"\n\
+         pirs-claw schedule tick [--run]\n\
+         pirs-claw serve --channel telegram|discord|slack|whatsapp|signal\n\
+         pirs-claw pair list|add|remove\n\
+         pirs-claw --exec docker|ssh:user@host …\n\
+         \n\
+         defaults: model={DEFAULT_MODEL} plan_model={DEFAULT_PLAN_MODEL} strategy={DEFAULT_STRATEGY}\n\
+         exec backends: local, docker, docker:<image>, docker@ctr, ssh:user@host\n\
+         (not supported: modal, daytona, singularity)\n\
+         registry: ~/.pirs/config.toml + secrets.env (same as pirs)\n\
+         gateway channels: {}",
+        GATEWAY_CHANNELS.join(", ")
+    );
+}
+
+async fn handle_gateway_message(
+    state: &Path,
+    cwd: &Path,
+    model: &str,
+    inbound: &InboundMessage,
+    skills: &[pirs_claw::Skill],
+    allow_code_tools: bool,
+) -> anyhow::Result<String> {
+    let sid = SessionId::from_inbound(inbound);
+    let store = SessionStore::open_for(state, sid.clone())?;
+    store.append("user", &inbound.text)?;
+    let mem = memory_bridge::open_memory(state).ok();
+    if let Some(ref m) = mem {
+        memory_bridge::scope_session(m, &sid.key());
+        memory_bridge::remember_turn(m, "user", &inbound.text);
+    }
+    let (provider, key, _) = registry::resolve_llm(model, 2)?;
+    require_llm_key(key.as_deref())?;
+    let completion = pirs_ai::CompletionOptions {
+        api_key: key,
+        ..Default::default()
+    };
+    let mut sys = claw_system_prompt();
+    sys.push_str(&skills_prompt_section(skills));
+    if let Some(ref m) = mem {
+        sys.push_str(&memory_bridge::recall_context(m, &inbound.text, 5));
+    }
+    let tools = if allow_code_tools {
+        coding_tools(cwd)
+    } else {
+        // Chat-safe: no write/edit/bash by default on messaging channels.
+        vec![Arc::new(pirs_tools::RecallTool::default()) as Arc<dyn pirs_agent::AgentTool>]
+    };
+    let mut agent = Agent::new(provider, model)
+        .with_system_prompt(sys)
+        .with_tools(tools)
+        .with_completion(completion);
+    if let Ok(mut msgs) = store.to_agent_messages() {
+        if let Some(pirs_ai::Message::User(_)) = msgs.last() {
+            msgs.pop();
+        }
+        agent.messages = msgs;
+    }
+    let new_msgs = agent.prompt(&inbound.text).await?;
+    let reply = extract_assistant_reply(&new_msgs)
+        .ok_or_else(|| anyhow::anyhow!("empty assistant reply"))?;
+    store.append("assistant", &reply)?;
+    if let Some(ref m) = mem {
+        memory_bridge::remember_turn(m, "assistant", &reply);
+    }
+    Ok(reply)
+}
+
+async fn run_chat(
+    state: &Path,
+    model: &str,
+    cwd: &Path,
+    text: &str,
+    skills: &[pirs_claw::Skill],
+) -> anyhow::Result<()> {
+    let inbound = InboundMessage::cli(text);
+    let (provider, key, _reg) = registry::resolve_llm(model, 2)?;
+    require_llm_key(key.as_deref())?;
+
+    let sid = SessionId::cli_local();
+    let store = SessionStore::open_for(state, sid.clone())?;
+    store.append("user", text)?;
+    let mem = memory_bridge::open_memory(state).ok();
+    if let Some(ref m) = mem {
+        memory_bridge::scope_session(m, &sid.key());
+        memory_bridge::remember_turn(m, "user", text);
+    }
+
+    let completion = pirs_ai::CompletionOptions {
+        api_key: key,
+        ..Default::default()
+    };
+    let mut sys = claw_system_prompt();
+    sys.push_str(&skills_prompt_section(skills));
+    if let Some(ref m) = mem {
+        sys.push_str(&memory_bridge::recall_context(m, text, 5));
+    }
+    let mut agent = Agent::new(provider, model)
+        .with_system_prompt(sys)
+        .with_tools(pirs_tools::default_tools(cwd.to_path_buf()))
+        .with_completion(completion);
+
+    let prior = store.load()?;
+    if prior.len() > 1 {
+        let mut msgs = store.to_agent_messages()?;
+        if let Some(pirs_ai::Message::User(_)) = msgs.last() {
+            msgs.pop();
+        }
+        agent.messages = msgs;
+    }
+
+    let new_msgs = agent
+        .prompt(text)
+        .await
+        .map_err(|e| anyhow::anyhow!("agent error (no assistant reply recorded): {e}"))?;
+    let reply = extract_assistant_reply(&new_msgs)
+        .ok_or_else(|| anyhow::anyhow!("empty assistant reply (nothing recorded as assistant)"))?;
+    store.append("assistant", &reply)?;
+    if let Some(ref m) = mem {
+        memory_bridge::remember_turn(m, "assistant", &reply);
+    }
+    CliChannel.deliver(&OutboundReply::to(&inbound, reply))?;
+    eprintln!(
+        "[pirs-claw chat: session {} exec={}]",
+        store.path().display(),
+        describe_exec_backend()
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // thin CLI wiring; not a public API surface
+async fn run_code(
+    cwd: &Path,
+    model: &str,
+    plan_model: &str,
+    strategy_name: &str,
+    prompt: &str,
+    max_turns: Option<usize>,
+    sequential: bool,
+    skills: &[pirs_claw::Skill],
+) -> anyhow::Result<()> {
+    let opts = apply_code_defaults(CodeOptions {
+        cwd: cwd.to_path_buf(),
+        model: model.into(),
+        plan_model: if plan_model.is_empty() {
+            None
+        } else {
+            Some(plan_model.into())
+        },
+        strategy: strategy_name.into(),
+        prompt: Some(prompt.into()),
+        max_turns,
+        sequential,
+    });
+
+    let strategy = resolve_code_strategy(&opts)?;
+    eprintln!(
+        "[pirs-claw code: cwd={} model={} plan_model={:?} strategy={} phases={} exec={}]",
+        opts.cwd.display(),
+        opts.model,
+        opts.plan_model,
+        strategy.name,
+        strategy.steps.len(),
+        describe_exec_backend()
+    );
+
+    let retries = if sequential { 3 } else { 2 };
+    let (provider, key, _) = registry::resolve_llm(&opts.model, retries)?;
+    require_llm_key(key.as_deref())?;
+    let completion = pirs_ai::CompletionOptions {
+        api_key: key,
+        ..Default::default()
+    };
+    let skill_section = skills_prompt_section(skills);
+
+    if strategy.name != "monolithic" && strategy.steps.len() > 1 {
+        let opts_c = opts.clone();
+        let provider_c = provider.clone();
+        let completion_c = completion.clone();
+        let skill_section_c = skill_section.clone();
+        let mut driver = AgentPhaseDriver::new(move |req: &PhaseReq| {
+            let model = req.model.clone().unwrap_or_else(|| opts_c.model.clone());
+            let mut tools = coding_tools(&opts_c.cwd);
+            if req.scope == ToolScope::ReadOnly {
+                tools.retain(|t| {
+                    matches!(
+                        t.name(),
+                        "read" | "grep" | "find" | "ls" | "code_map" | "code_search" | "recall"
+                    )
+                });
+            }
+            let mut system = if req.system.trim().is_empty() {
+                coding_system_prompt(&opts_c.cwd)
+            } else {
+                req.system.clone()
+            };
+            system.push_str(&skill_section_c);
+            let cwd_for_sub = opts_c.cwd.clone();
+            let sub = pirs_agent::delegate::DelegateTool::new(
+                provider_c.clone(),
+                opts_c.model.clone(),
+                completion_c.clone(),
+                move || coding_tools(&cwd_for_sub),
+            );
+            tools.push(sub);
+            let mut agent = Agent::new(provider_c.clone(), model)
+                .with_system_prompt(system)
+                .with_tools(tools)
+                .with_completion(completion_c.clone());
+            if let Some(n) = opts_c.max_turns {
+                agent.budgets.max_turns = Some(n);
+            }
+            if opts_c.sequential {
+                agent = agent.with_tool_execution(pirs_agent::ExecutionMode::Sequential);
+            }
+            agent
+        });
+
+        let task = Task {
+            issue: prompt.to_string(),
+            targets: Vec::new(),
+            verdict: None,
+        };
+        run_strategy_async(&strategy, &mut driver, &task).await?;
+        let reply = extract_assistant_reply(driver.messages())
+            .unwrap_or_else(|| "(strategy completed; no final assistant text)".into());
+        println!("{reply}");
+        return Ok(());
+    }
+
+    let mut sys = coding_system_prompt(&opts.cwd);
+    sys.push_str(&skill_section);
+    let cwd_for_sub = opts.cwd.clone();
+    let sub = pirs_agent::delegate::DelegateTool::new(
+        provider.clone(),
+        opts.model.clone(),
+        completion.clone(),
+        move || coding_tools(&cwd_for_sub),
+    );
+    let mut tools = coding_tools(&opts.cwd);
+    tools.push(sub);
+    let mut agent = build_code_agent(provider, &opts)
+        .with_completion(completion)
+        .with_system_prompt(sys)
+        .with_tools(tools);
+    let msgs = agent.prompt(prompt).await?;
+    if let Some(reply) = extract_assistant_reply(&msgs) {
+        println!("{reply}");
+    } else {
+        anyhow::bail!("empty assistant reply");
+    }
+    Ok(())
 }
