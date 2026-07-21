@@ -113,8 +113,12 @@ fn detect(root: &Path, filter: Option<&str>) -> Result<Runner, String> {
 }
 
 /// Public detect for strategy auto-verify (`--weak` without explicit `--verify`).
-/// Returns `(ecosystem, command)` or `None` when no marker files are present.
+/// Prefers the Soulforge-style project profile `test` command when available,
+/// then falls back to the legacy marker table.
 pub fn detect_verify_command(root: &Path) -> Option<(String, String)> {
+    if let Some(v) = crate::project::detect_verify_from_profile(root) {
+        return Some(v);
+    }
     detect(root, None)
         .ok()
         .map(|r| (r.ecosystem.to_string(), r.command))

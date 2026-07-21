@@ -80,6 +80,23 @@ Gateway default tools: **recall + skill_list/view + web_fetch/search** (no bash/
 
 User `~/.pirs/config.toml` only (same shape as harness). Keys from secrets.env.
 
+## Project toolchain (Soulforge-style)
+
+Shared via `pirs-tools::project` (harness + claw). Marker-file detection yields
+`test` / `lint` / `typecheck` / `build` / `format` / `run` commands; injected
+into the system prompt and available as the `project` tool:
+
+```text
+project(action: "list")
+project(action: "test")
+project(action: "lint")
+project(action: "typecheck", cwd: "packages/api")
+```
+
+Ecosystems include Bun/Deno/npm-pnpm-yarn, Cargo, Go, Python (uv/poetry/pip),
+.NET, PHP, Ruby, Gradle/Maven, CMake/Make, Zig. Prefer `project` over inventing
+shell. Weak auto-verify uses `profile.test` when present.
+
 ## Exec backends
 
 ```bash

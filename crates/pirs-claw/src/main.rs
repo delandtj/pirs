@@ -755,6 +755,9 @@ async fn handle_gateway_message(
     };
     let mut sys = claw_system_prompt();
     sys.push_str(&skills_prompt_section(skills));
+    if allow_code_tools {
+        sys.push_str(&pirs_tools::detect_profile(cwd).prompt_section());
+    }
     if let Some(ref m) = mem {
         sys.push_str(&memory_bridge::recall_context(m, &inbound.text, 5));
     }
@@ -819,6 +822,7 @@ async fn run_chat(
     };
     let mut sys = claw_system_prompt();
     sys.push_str(&skills_prompt_section(skills));
+    sys.push_str(&pirs_tools::detect_profile(cwd).prompt_section());
     if let Some(ref m) = mem {
         sys.push_str(&memory_bridge::recall_context(m, text, 5));
     }
@@ -928,6 +932,7 @@ async fn run_code(
         ..Default::default()
     };
     let skill_section = skills_prompt_section(skills);
+    let project_section = pirs_tools::detect_profile(&opts.cwd).prompt_section();
     let key_for_learn = completion.api_key.clone();
     let skills_owned: Vec<Skill> = skills.to_vec();
 
@@ -936,6 +941,7 @@ async fn run_code(
         let provider_c = provider.clone();
         let completion_c = completion.clone();
         let skill_section_c = skill_section.clone();
+        let project_section_c = project_section.clone();
         let skills_c = skills_owned.clone();
         let mut driver = AgentPhaseDriver::new(move |req: &PhaseReq| {
             let model = req.model.clone().unwrap_or_else(|| opts_c.model.clone());
@@ -960,6 +966,8 @@ async fn run_code(
                             | "skill_view"
                             | "web_fetch"
                             | "web_search"
+                            | "project"
+                            | "run_tests"
                     )
                 });
             }
@@ -969,6 +977,7 @@ async fn run_code(
                 req.system.clone()
             };
             system.push_str(&skill_section_c);
+            system.push_str(&project_section_c);
             let cwd_for_sub = opts_c.cwd.clone();
             let sub = pirs_agent::delegate::DelegateTool::new(
                 provider_c.clone(),
@@ -1015,6 +1024,7 @@ async fn run_code(
 
     let mut sys = coding_system_prompt(&opts.cwd);
     sys.push_str(&skill_section);
+    sys.push_str(&project_section);
     let cwd_for_sub = opts.cwd.clone();
     let sub = pirs_agent::delegate::DelegateTool::new(
         provider.clone(),

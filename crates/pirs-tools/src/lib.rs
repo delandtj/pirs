@@ -45,6 +45,7 @@ pub mod grep;
 pub mod job_tools;
 pub mod ls;
 pub mod paths;
+pub mod project;
 pub mod read;
 pub mod recall;
 pub mod run_tests;
@@ -61,6 +62,7 @@ pub use grep::GrepTool;
 pub use ls::LsTool;
 pub use read::ReadTool;
 pub use recall::RecallTool;
+pub use project::{detect_profile, detect_toolchain_label, ProjectProfile, ProjectTool};
 pub use run_tests::RunTestsTool;
 pub use web::life_tools;
 pub use write::WriteTool;
@@ -75,6 +77,7 @@ pub fn default_tools(cwd: PathBuf) -> Vec<Arc<dyn AgentTool>> {
         Arc::new(GrepTool::new(cwd.clone())),
         Arc::new(FindTool::new(cwd.clone())),
         Arc::new(LsTool::new(cwd.clone())),
+        Arc::new(ProjectTool::new(cwd.clone())),
         Arc::new(RunTestsTool::new(cwd)),
         Arc::new(RecallTool::default()),
     ];

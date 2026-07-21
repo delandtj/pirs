@@ -59,7 +59,10 @@ pub fn build_system_prompt_with_map(
     } else {
         prompt.push_str("- Use grep/find/ls to explore the codebase instead of guessing paths.\n");
     }
-    prompt.push_str("- Use bash for builds, tests, and git operations.\n");
+    prompt.push_str(
+        "- Prefer the `project` tool for test/lint/typecheck/build/format when available; \
+         use bash for one-off git/ops commands.\n",
+    );
 
     if weak {
         prompt.push_str(
@@ -73,6 +76,9 @@ pub fn build_system_prompt_with_map(
     }
 
     prompt.push_str(&format!("\nCurrent working directory: {}\n", cwd.display()));
+
+    // Soulforge-style auto-detected toolchain commands.
+    prompt.push_str(&pirs_tools::detect_profile(cwd).prompt_section());
 
     if let Some(map) = repo_map {
         if !map.trim().is_empty() {
