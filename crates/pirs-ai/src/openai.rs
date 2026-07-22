@@ -592,15 +592,54 @@ pub fn build_request_body(model: &str, ctx: &Context, options: &CompletionOption
 }
 
 fn tool_to_openai(tool: &crate::ToolDef) -> Value {
+    let mut parameters = tool.parameters.clone();
+    normalize_schema_defs(&mut parameters);
     json!({
         "type": "function",
         "function": {
             "name": tool.name,
             "description": tool.description,
-            "parameters": tool.parameters,
+            "parameters": parameters,
             "strict": false,
         }
     })
+}
+
+/// Normalize a JSON Schema into the Draft 2020-12 shape strict function-schema
+/// validators expect. `schemars` 0.8 emits Draft-07: a root `definitions`
+/// block and `#/definitions/...` `$ref`s. Moonshot/Kimi's validator rejects
+/// that outright ("references must start with #/$defs/"). This renames the root
+/// `definitions` object to `$defs`, rewrites every `#/definitions/...` `$ref`
+/// (anywhere in the tree) to `#/$defs/...`, and drops the Draft-07 `$schema`
+/// declaration so the server assumes its native draft. Idempotent, and the
+/// normalized form is accepted by OpenAI and other compatible gateways too.
+fn normalize_schema_defs(schema: &mut Value) {
+    if let Value::Object(map) = schema {
+        map.remove("$schema");
+        // Only the ROOT `definitions` key is a schemars 0.8 defs block; renaming
+        // it tree-wide could clobber a property legitimately named "definitions".
+        if let Some(defs) = map.remove("definitions") {
+            map.entry("$defs").or_insert(defs);
+        }
+    }
+    rewrite_definition_refs(schema);
+}
+
+fn rewrite_definition_refs(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            if let Some(Value::String(r)) = map.get_mut("$ref") {
+                if let Some(rest) = r.strip_prefix("#/definitions/") {
+                    *r = format!("#/$defs/{rest}");
+                }
+            }
+            for (_k, child) in map.iter_mut() {
+                rewrite_definition_refs(child);
+            }
+        }
+        Value::Array(arr) => arr.iter_mut().for_each(rewrite_definition_refs),
+        _ => {}
+    }
 }
 
 fn echo_reasoning_to_provider(provider: &str) -> bool {
@@ -738,6 +777,50 @@ mod tests {
         assert_eq!(normalize_tool_call_id("call_abc|xyz"), "call_abc");
         assert_eq!(normalize_tool_call_id("a b.c"), "a_b_c");
         assert_eq!(normalize_tool_call_id(&"x".repeat(50)), "x".repeat(40));
+    }
+
+    #[test]
+    fn normalize_schema_defs_rewrites_draft07_to_2020() {
+        // The exact shape schemars 0.8 emits for the `edit` tool that Kimi
+        // rejected: root `definitions`, `$schema`, and `#/definitions/...` refs.
+        let mut schema = json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "EditArgs",
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "edits": {
+                    "type": "array",
+                    "items": { "$ref": "#/definitions/EditOp" }
+                }
+            },
+            "definitions": {
+                "EditOp": {
+                    "type": "object",
+                    "properties": { "oldText": { "type": "string" } }
+                }
+            }
+        });
+        normalize_schema_defs(&mut schema);
+        assert!(schema.get("$schema").is_none(), "$schema dropped");
+        assert!(schema.get("definitions").is_none(), "definitions renamed");
+        assert!(schema.get("$defs").is_some(), "$defs present");
+        assert_eq!(
+            schema["properties"]["edits"]["items"]["$ref"],
+            "#/$defs/EditOp",
+            "ref rewritten to #/$defs/"
+        );
+    }
+
+    #[test]
+    fn normalize_schema_defs_is_idempotent_and_leaves_clean_schemas() {
+        let mut clean = json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } }
+        });
+        let before = clean.clone();
+        normalize_schema_defs(&mut clean);
+        assert_eq!(clean, before, "already-clean schema is untouched");
     }
 
     #[test]
