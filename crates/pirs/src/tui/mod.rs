@@ -1175,8 +1175,13 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
                 app.dirty = true;
             }
             _ => {
-                if app.running {
-                    app.dirty = true;
+                // Spinner / elapsed / stream caret: repaint ~5/s, not every 50ms.
+                // Full-frame redraws at 20Hz made the compose box flicker.
+                if app.running || app.live.is_some() {
+                    app.tick = app.tick.wrapping_add(1);
+                    if app.tick.is_multiple_of(4) {
+                        app.dirty = true;
+                    }
                 }
             }
         }
@@ -2731,9 +2736,8 @@ fn draw_chat(frame: &mut ratatui::Frame, area: Rect, app: &mut App, theme: &Them
 }
 
 fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &mut App, theme: &Theme) {
-    // ~7.5–10 fps spinner (tick advances every dirty frame while running).
+    // Spinner frames; `app.tick` advances on the event-loop throttle while busy.
     const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-    app.tick = app.tick.wrapping_add(1);
 
     let mut left: Vec<Span<'static>> = Vec::new();
     let mut right: Vec<Span<'static>> = Vec::new();
@@ -2748,7 +2752,9 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &mut App, theme: &Th
         ));
         right.push(Span::styled(" y / a / n · esc ", theme.dim));
     } else if app.running {
-        let spin = FRAMES[(app.tick / 2 % 10) as usize];
+        // ~5 spinner frames/sec at 50ms loop — avoids thrashing the full frame
+        // (and the compose cursor) every timeout tick.
+        let spin = FRAMES[((app.tick / 4) % 10) as usize];
         left.push(Span::styled(format!(" {spin} "), theme.accent));
         let activity = if !app.last_activity.is_empty() {
             app.last_activity.as_str()
@@ -2771,8 +2777,13 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &mut App, theme: &Th
         left.push(Span::styled("ready", theme.status));
         if !app.status_msg.is_empty() {
             left.push(Span::styled(format!("  ·  {}", app.status_msg), theme.dim));
+        } else {
+            // Single place for idle hints (compose box stays clean).
+            left.push(Span::styled(
+                "  ·  enter send · ? help · /model",
+                theme.dim,
+            ));
         }
-        left.push(Span::styled("  ·  ? help  ·  tab expand tool", theme.dim));
     }
 
     if app.scroll > 0 {
@@ -2811,16 +2822,17 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &mut App, theme: &Th
 fn draw_input(frame: &mut ratatui::Frame, area: Rect, app: &mut App, theme: &Theme) {
     let pending = app.pending_approval.lock().unwrap().is_some();
     let border_style = composer_mode_style(theme, &app.approval_mode, app.running, pending);
+    // Title = mode badge only (hints live in status bar / ? help — not duplicated here).
     let title = if pending {
-        " approval · [y]es  [a]lways session  [n]o  esc "
+        " approval "
     } else if app.running {
-        " ❯ steer · enter queue · esc cancel "
+        " steer "
     } else {
         match app.approval_mode.to_ascii_lowercase().as_str() {
-            m if m.contains("yolo") || m == "auto" => " ❯ yolo · enter send · ? help ",
-            m if m.contains("plan") => " ❯ plan · enter send · /act to write ",
-            m if m.contains("ask") => " ❯ ask · enter send · approvals on ",
-            _ => " ❯ message · enter send · alt+enter newline ",
+            m if m.contains("yolo") || m == "auto" => " yolo ",
+            m if m.contains("plan") => " plan ",
+            m if m.contains("ask") => " ask ",
+            _ => " message ",
         }
     };
 
@@ -2831,11 +2843,11 @@ fn draw_input(frame: &mut ratatui::Frame, area: Rect, app: &mut App, theme: &The
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Empty compose: leave blank so the terminal cursor is the only cue.
+    // (A placeholder + title both saying "enter send · ? help" looked doubled
+    // and flickered when the frame/cursor redrawn.)
     let (display, style) = if app.input.is_empty() && !pending {
-        (
-            "message · enter send · ? help".to_string(),
-            theme.placeholder,
-        )
+        (String::new(), theme.input)
     } else {
         (
             app.input.clone(),
@@ -2848,8 +2860,7 @@ fn draw_input(frame: &mut ratatui::Frame, area: Rect, app: &mut App, theme: &The
     frame.render_widget(para, inner);
 
     // Cursor position accounting for multi-line wrap.
-    let cursor_text = if app.input.is_empty() && !pending {
-        // Keep cursor at start over placeholder.
+    let cursor_text = if app.input.is_empty() {
         ""
     } else {
         &app.input[..app.cursor.min(app.input.len())]
