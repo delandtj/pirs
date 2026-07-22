@@ -176,21 +176,52 @@ impl ChatItem {
     }
 }
 
+/// Live stream: always show the tail of reasoning so it is visible while
+/// generating (history collapse does not apply here).
+fn render_thinking_live(thinking: &str, theme: &Theme) -> Vec<Line<'static>> {
+    const TAIL: usize = 24;
+    let lines: Vec<&str> = thinking.lines().filter(|l| !l.trim().is_empty()).collect();
+    let total = lines.len();
+    if total == 0 {
+        return Vec::new();
+    }
+    let skip = total.saturating_sub(TAIL);
+    let mut out = vec![Line::from(vec![
+        Span::styled("    · ", theme.accent),
+        Span::styled(
+            format!("thinking… ({total} line{})", if total == 1 { "" } else { "s" }),
+            theme.thinking,
+        ),
+    ])];
+    if skip > 0 {
+        out.push(Line::from(Span::styled(
+            format!("      … +{skip} earlier"),
+            theme.dim,
+        )));
+    }
+    for l in lines.into_iter().skip(skip) {
+        out.push(Line::from(Span::styled(
+            format!("      {l}"),
+            theme.thinking,
+        )));
+    }
+    out
+}
+
 fn render_thinking(thinking: &str, theme: &Theme, expanded: bool) -> Vec<Line<'static>> {
-    // Show a generous window when expanded (was 8 — felt like expand was broken).
-    const MAX: usize = 80;
+    // History view: generous window when expanded.
+    const MAX: usize = 120;
     let lines: Vec<&str> = thinking.lines().filter(|l| !l.trim().is_empty()).collect();
     let total = lines.len();
     if total == 0 {
         return Vec::new();
     }
     if !expanded {
-        // Bright chevron so it's obvious this is a control, not dead chrome.
         return vec![Line::from(vec![
             Span::styled("    ▶ ", theme.accent),
             Span::styled(
                 format!(
-                    "thought · {total} line{}  (t or ctrl-o to expand)",
+                    "thought · {total} line{}  · press t to show",
                     if total == 1 { "" } else { "s" }
                 ),
                 theme.thinking,
@@ -201,7 +232,7 @@ fn render_thinking(thinking: &str, theme: &Theme, expanded: bool) -> Vec<Line<'s
     let mut out = vec![Line::from(vec![
         Span::styled("    ▼ ", theme.accent),
         Span::styled(
-            format!("thought · {total} lines  (t or ctrl-o to collapse)"),
+            format!("thought · {total} lines  · press t to hide"),
             theme.thinking,
         ),
     ])];
@@ -574,16 +605,37 @@ impl App {
     fn toggle_thoughts(&mut self) {
         self.thinking_expanded = !self.thinking_expanded;
         for i in 0..self.items.len() {
-            if matches!(self.items[i], ChatItem::Assistant { .. }) {
-                self.invalidate_item(i);
+            if let ChatItem::Assistant { thinking, .. } = &self.items[i] {
+                if thinking.trim().is_empty() {
+                    continue;
+                }
+                let estimate = if self.thinking_expanded {
+                    // Rough pre-measure so scroll math doesn't clamp before paint.
+                    thinking.lines().filter(|l| !l.trim().is_empty()).count().min(80) + 6
+                } else {
+                    4
+                };
+                if let Some(c) = self.item_caches.get_mut(i) {
+                    c.rows = None;
+                    c.row_count = estimate.max(1);
+                }
             }
         }
-        // Live stream also uses thinking_expanded on next paint.
         self.dirty = true;
+        let n = self
+            .items
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i,
+                    ChatItem::Assistant { thinking, .. } if !thinking.trim().is_empty()
+                )
+            })
+            .count();
         self.set_status(if self.thinking_expanded {
-            "thoughts expanded (t / ctrl-o to collapse)"
+            format!("thoughts shown ({n} msg) · t / ctrl-o / /thoughts to hide")
         } else {
-            "thoughts collapsed (t / ctrl-o to expand)"
+            format!("thoughts hidden ({n} msg) · t / ctrl-o / /thoughts to show")
         });
     }
 
@@ -1034,7 +1086,8 @@ pub async fn run(mut opts: TuiOptions) -> anyhow::Result<()> {
         status_msg: String::new(),
         last_activity: String::new(),
         turn_started_at: None,
-        thinking_expanded: false,
+        // Show reasoning live + in history by default; user can hide with t.
+        thinking_expanded: true,
         slash_sel: 0,
         first_run_session: is_first_tui_run(),
         should_quit: false,
@@ -2700,18 +2753,25 @@ fn draw_chat(frame: &mut ratatui::Frame, area: Rect, app: &mut App, theme: &Them
     // tokens), so it is wrapped fresh each time — only the tail, cheap.
     let mut live_rows: Vec<Line<'static>> = Vec::new();
     if let Some((thinking, text)) = &app.live {
+        let phase = if !thinking.trim().is_empty() && text.trim().is_empty() {
+            "  thinking"
+        } else if !thinking.trim().is_empty() {
+            "  streaming (+thoughts)"
+        } else {
+            "  streaming"
+        };
         let mut logical: Vec<Line<'static>> = vec![
             Line::from(""),
             Line::from(vec![
                 Span::styled("  │ ", theme.assistant_label),
                 Span::styled("assistant", theme.assistant_label),
-                Span::styled("  streaming", theme.dim),
+                Span::styled(phase.to_string(), theme.dim),
             ]),
         ];
         if !thinking.trim().is_empty() {
-            // While streaming, show thinking expanded lightly (last lines).
-            // Honor toggle during stream too (was always force-expanded).
-            logical.extend(render_thinking(thinking, theme, app.thinking_expanded));
+            // Live reasoning always paints content (tail), even if history is collapsed —
+            // otherwise users never see thinking "while it's happening".
+            logical.extend(render_thinking_live(thinking, theme));
         }
         if !text.trim().is_empty() {
             logical.extend(render_markdown(text, theme, width.saturating_sub(4)));
@@ -3390,16 +3450,52 @@ fn apply_agent_event(app: &mut App, event: AgentEvent) {
 }
 
 fn extract_thinking(a: &pirs_ai::AssistantMessage) -> String {
-    a.content
+    let mut parts: Vec<String> = a
+        .content
         .iter()
         .filter_map(|b| match b {
-            pirs_ai::ContentBlock::Thinking { thinking, .. } if !thinking.trim().is_empty() => {
-                Some(thinking.as_str())
+            pirs_ai::ContentBlock::Thinking { thinking, redacted, .. }
+                if !thinking.trim().is_empty() =>
+            {
+                if *redacted {
+                    Some(String::from("[redacted thinking]"))
+                } else {
+                    Some(thinking.clone())
+                }
             }
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    // Fallback: some models stuff reasoning into text as <think>…</think>.
+    if parts.is_empty() {
+        let text = a.text();
+        if let Some(inner) = extract_think_tags(&text) {
+            parts.push(inner);
+        }
+    }
+    parts.join("\n")
+}
+
+/// Pull `<think>…</think>` / `<thinking>…</thinking>` bodies from assistant text.
+fn extract_think_tags(text: &str) -> Option<String> {
+    for (open, close) in [("<think>", "</think>"), ("<thinking>", "</thinking>")] {
+        if let Some(start) = text.find(open) {
+            let after = start + open.len();
+            if let Some(end) = text[after..].find(close) {
+                let body = text[after..after + end].trim();
+                if !body.is_empty() {
+                    return Some(body.to_string());
+                }
+            } else {
+                // Unclosed tag while streaming — show partial.
+                let body = text[after..].trim();
+                if !body.is_empty() {
+                    return Some(body.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 // ── Approval bridge ─────────────────────────────────────────────────────────
@@ -3685,7 +3781,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_collapsed_by_default() {
+    fn thinking_can_collapse_and_expand() {
         let theme = Theme::default_dark();
         let item = ChatItem::Assistant {
             thinking: "line1\nline2\nline3".into(),
@@ -3706,6 +3802,26 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
             .collect();
         assert!(flat_e.contains("line1"), "{flat_e}");
+        assert!(flat_e.contains("▼ thought"), "{flat_e}");
+    }
+
+    #[test]
+    fn thinking_live_always_shows_tail() {
+        let theme = Theme::default_dark();
+        let body = (0..30).map(|i| format!("step {i}")).collect::<Vec<_>>().join("\n");
+        let lines = render_thinking_live(&body, &theme);
+        let flat: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(flat.contains("thinking…"), "{flat}");
+        assert!(flat.contains("step 29"), "must show latest: {flat}");
+    }
+
+    #[test]
+    fn extract_think_tags_from_text() {
+        let s = extract_think_tags("before <think>\nhmm\n</think> after").unwrap();
+        assert!(s.contains("hmm"));
     }
 
     #[test]
@@ -4058,7 +4174,8 @@ mod tests {
             status_msg: String::new(),
             last_activity: String::new(),
             turn_started_at: None,
-            thinking_expanded: false,
+            // Show reasoning live + in history by default; user can hide with t.
+        thinking_expanded: true,
             slash_sel: 0,
             first_run_session: false,
             should_quit: false,
