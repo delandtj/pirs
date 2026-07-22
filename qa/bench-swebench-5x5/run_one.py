@@ -122,31 +122,48 @@ def run_instance(instance_id: str, model: str, max_turns: int, timeout_s: int, o
             # Recover real test_* names from the test_patch instead of re-injecting
             # the docstring (which always ReproFailed with turns=0).
             def targets_from_test_patch(diff: str) -> list[str]:
+                """Pull test_* names the patch actually touches.
+
+                Keep a def only if a `+` body line appears before the next def,
+                so we do not grab the following untouched test as FAIL_TO_PASS.
+                """
                 out: list[str] = []
                 cur_file = ""
-                for line in diff.splitlines():
+                lines = diff.splitlines()
+                i = 0
+                while i < len(lines):
+                    line = lines[i]
                     if line.startswith("+++ b/"):
                         cur_file = line[6:].strip()
-                    # Newly added or context def lines (unified diff: leading
-                    # +/-/space, then indentation, then def).
+                        i += 1
+                        continue
                     m = re.match(r"^[+ ]\s*def (test_\w+)\s*\(", line)
                     if not m:
+                        i += 1
                         continue
                     name = m.group(1)
-                    if cur_file.endswith(".py"):
-                        # Prefer pytest-style path::name; django runner also accepts
-                        # short names via fuzzy match / module discovery.
-                        out.append(f"{cur_file}::{name}")
-                    else:
-                        out.append(name)
-                # de-dupe preserve order
-                seen: set[str] = set()
-                uniq = []
-                for t in out:
-                    if t not in seen:
-                        seen.add(t)
-                        uniq.append(t)
-                return uniq
+                    touched = line.startswith("+")
+                    j = i + 1
+                    while j < len(lines):
+                        nxt = lines[j]
+                        if re.match(r"^[+ ]\s*def (test_\w+)\s*\(", nxt):
+                            break
+                        if nxt.startswith("+++ b/") or nxt.startswith("diff --git"):
+                            break
+                        if nxt.startswith("+") and not nxt.startswith("+++"):
+                            touched = True
+                            break
+                        j += 1
+                    if touched:
+                        tid = (
+                            f"{cur_file}::{name}"
+                            if cur_file.endswith(".py")
+                            else name
+                        )
+                        if tid not in out:
+                            out.append(tid)
+                    i += 1
+                return out
 
             tp = inst.get("test_patch") or ""
             recovered = targets_from_test_patch(tp)
