@@ -83,6 +83,22 @@ pub fn targets_reproduce(base: &Snapshot, targets: &[TestId]) -> Result<(), Test
     Ok(())
 }
 
+/// Soft reproduce for SWE-bench-style FAIL_TO_PASS lists: keep only targets that
+/// are red at baseline. Dataset rows often mix (a) new tests added by `test_patch`
+/// that fail without the gold fix with (b) pre-existing tests that are already
+/// green. Requiring *every* listed id to be red aborts the fix agent with
+/// `ReproFailed` even when a real red target exists (observed on django-11583 /
+/// django-11905: one fail + one pass → turns=0).
+///
+/// Returns the red subset. Empty means nothing reproduced.
+pub fn red_targets_at_baseline(base: &Snapshot, targets: &[TestId]) -> Vec<TestId> {
+    targets
+        .iter()
+        .filter(|t| matches!(base.get(t), Some(o) if o.is_red()))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +216,15 @@ mod tests {
             targets_reproduce(&missing, &ids(&["t1"])),
             Err("t1".to_string())
         );
+    }
+
+    #[test]
+    fn red_targets_keeps_only_failing_subset() {
+        let base = Snapshot::from_pairs([("t1", Fail), ("t2", Pass), ("t3", Errored)]);
+        assert_eq!(
+            red_targets_at_baseline(&base, &ids(&["t1", "t2", "t3", "t4"])),
+            ids(&["t1", "t3"])
+        );
+        assert!(red_targets_at_baseline(&base, &ids(&["t2", "t4"])).is_empty());
     }
 }

@@ -89,6 +89,9 @@ impl DetectorHost {
         // Ranked first: the CI oracle is the highest-trust hypothesis (§ runner
         // discovery), so a CI-confirmed runner is probed before structural guesses.
         host.load_detector("ci", include_str!("../detectors/ci.rhai"))?;
+        // Django before generic pytest: both markers fire on django trees, and
+        // pytest never confirms on SWE-bench django images (unittest labels).
+        host.load_detector("django", include_str!("../detectors/django.rhai"))?;
         host.load_detector("pytest", include_str!("../detectors/pytest.rhai"))?;
         host.load_detector("go", include_str!("../detectors/go.rhai"))?;
         host.load_detector("rust", include_str!("../detectors/rust.rhai"))?;
@@ -253,6 +256,23 @@ mod tests {
             .find(|s| s.framework == "go")
             .expect("go spec");
         assert_eq!(go.test_join, "|", "Go must join ids as a regex alternation");
+    }
+
+    #[test]
+    fn bundled_django_detects_suite_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        std::fs::create_dir_all(dir.path().join("django")).unwrap();
+        std::fs::write(dir.path().join("tests/runtests.py"), "# django suite\n").unwrap();
+        let host = DetectorHost::with_bundled().unwrap();
+        let specs = host.detect(dir.path());
+        let dj = specs
+            .iter()
+            .find(|s| s.framework == "django")
+            .expect("django spec");
+        assert!(dj.test_cmd.contains("pirs_django_run") || dj.test_cmd.contains("base64"));
+        assert!(dj.shell_quote_tests, "django ids have spaces/parens");
+        assert!(dj.list_cmd.contains("runtests.py") || dj.list_cmd.contains("django"));
     }
 
     #[test]

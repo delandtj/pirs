@@ -105,7 +105,7 @@ fn set_outcome(cur: &mut Option<JunitCase>, outcome: TestOutcome) {
 pub fn to_snapshot(requested: &[TestId], cases: &[JunitCase], build_ok: bool) -> Snapshot {
     let mut states = std::collections::HashMap::new();
     for id in requested {
-        let leaf = id.rsplit([':', '/']).next().unwrap_or(id);
+        let leaf = request_leaf(id);
         let hit = cases
             .iter()
             .filter(|c| c.leaf() == leaf)
@@ -119,6 +119,21 @@ pub fn to_snapshot(requested: &[TestId], cases: &[JunitCase], build_ok: bool) ->
         build_ok,
         runs: 1,
     }
+}
+
+/// Leaf name for matching a requested id against a JUnit `name`.
+///
+/// - pytest: `path/to/test.py::test_case` → `test_case`
+/// - django/unittest label: `test_case (module.Class)` → `test_case`
+/// - bare: `test_case` → `test_case`
+fn request_leaf(id: &str) -> &str {
+    // Strip unittest/django " (classname)" suffix before taking the last segment.
+    let base = id
+        .split_once(" (")
+        .map(|(head, _)| head)
+        .unwrap_or(id)
+        .trim();
+    base.rsplit([':', '/']).next().unwrap_or(base)
 }
 
 /// Whether a JUnit `classname` plausibly belongs to the requested node id: each
@@ -172,6 +187,32 @@ mod tests {
         let snap = to_snapshot(&requested, &cases, true);
         assert_eq!(snap.get("tests/test_math.py::test_add"), Some(Pass));
         assert_eq!(snap.get("tests/test_math.py::test_sub"), Some(Fail));
+    }
+
+    #[test]
+    fn matches_django_unittest_labels() {
+        // SWE-bench FAIL_TO_PASS uses "test_x (module.Class)"; JUnit name is leaf.
+        let cases = vec![
+            JunitCase {
+                classname: "utils_tests.test_autoreload.TestIterModulesAndFiles".into(),
+                name: "test_path_with_embedded_null_bytes".into(),
+                outcome: Fail,
+            },
+            JunitCase {
+                classname: "utils_tests.test_autoreload.TestIterModulesAndFiles".into(),
+                name: "test_paths_are_pathlib_instances".into(),
+                outcome: Pass,
+            },
+        ];
+        let requested = vec![
+            "test_path_with_embedded_null_bytes (utils_tests.test_autoreload.TestIterModulesAndFiles)"
+                .into(),
+            "test_paths_are_pathlib_instances (utils_tests.test_autoreload.TestIterModulesAndFiles)"
+                .into(),
+        ];
+        let snap = to_snapshot(&requested, &cases, true);
+        assert_eq!(snap.get(&requested[0]), Some(Fail));
+        assert_eq!(snap.get(&requested[1]), Some(Pass));
     }
 
     #[test]

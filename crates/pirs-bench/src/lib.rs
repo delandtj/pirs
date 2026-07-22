@@ -24,7 +24,9 @@ pub mod run;
 pub mod timing;
 pub mod types;
 
-pub use baseline::{capture_stable, capture_stable_cached, targets_reproduce};
+pub use baseline::{
+    capture_stable, capture_stable_cached, red_targets_at_baseline, targets_reproduce,
+};
 pub use bootstrap::{bootstrap, Bootstrap};
 pub use cache::BaselineCache;
 pub use command::CommandRunner;

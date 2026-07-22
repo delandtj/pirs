@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::baseline::{capture_stable, capture_stable_cached, targets_reproduce};
+use crate::baseline::{capture_stable, capture_stable_cached};
 use crate::cache::BaselineCache;
 use crate::gate::Verdict;
 use crate::run::{verify, TestRunner, VerifyPlan};
@@ -102,8 +102,11 @@ fn drive(
     max_attempts: u32,
     timings: &mut Timings,
 ) -> anyhow::Result<Outcome> {
-    // Reproduce: every target must be red at baseline, or there is nothing to fix.
-    if targets_reproduce(&baseline, &spec.targets).is_err() {
+    // Soft reproduce: keep only targets that are red at baseline. SWE-bench
+    // FAIL_TO_PASS often includes already-green ids; requiring all red aborted
+    // every mixed instance with ReproFailed / turns=0 (see LEARNINGS).
+    let targets = crate::baseline::red_targets_at_baseline(&baseline, &spec.targets);
+    if targets.is_empty() {
         return Ok(Outcome::Failed(FailBucket::ReproFailed));
     }
 
@@ -112,7 +115,7 @@ fn drive(
     // at most once *per flip*, only after the Inner ring goes green, so a failing
     // attempt never pays for the whole keep-green suite. With no keep_green the
     // two rings coincide and the second pass is skipped.
-    let has_regression_ring = scope.len() > spec.targets.len();
+    let has_regression_ring = scope.len() > targets.len();
 
     let mut last: Option<Verdict> = None;
     for attempt in 1..=max_attempts {
@@ -121,8 +124,8 @@ fn drive(
             break; // executor gave up
         }
         let inner = VerifyPlan {
-            targets: &spec.targets,
-            scope: &spec.targets,
+            targets: &targets,
+            scope: &targets,
             baseline: &baseline,
         };
         let verdict = timings.time("verify", || verify(runner, &inner, Ring::Inner))?;
@@ -135,7 +138,7 @@ fn drive(
         }
         // Targets flipped — now (and only now) pay for the regression ring.
         let scoped = VerifyPlan {
-            targets: &spec.targets,
+            targets: &targets,
             scope,
             baseline: &baseline,
         };
@@ -411,6 +414,46 @@ mod tests {
         assert_eq!(
             run_task(&spec, &runner, &mut NoExec, 3, &mut Timings::new()).unwrap(),
             Outcome::Failed(FailBucket::ReproFailed)
+        );
+    }
+
+    #[test]
+    fn mixed_targets_proceed_with_red_subset() {
+        // SWE-bench style: one FAIL_TO_PASS is red, another is already green.
+        // Soft reproduce must not ReproFailed — fix the red one and solve.
+        let fixed = Cell::new(false);
+        struct MixedRunner<'a> {
+            fixed: &'a Cell<bool>,
+        }
+        impl TestRunner for MixedRunner<'_> {
+            fn run(&self, ids: &[TestId], _ring: Ring) -> anyhow::Result<Snapshot> {
+                Ok(Snapshot::from_pairs(ids.iter().map(|id| {
+                    let o = match id.as_str() {
+                        "red" if !self.fixed.get() => Fail,
+                        _ => Pass,
+                    };
+                    (id.clone(), o)
+                })))
+            }
+        }
+        struct FixRed<'a> {
+            fixed: &'a Cell<bool>,
+        }
+        impl Executor for FixRed<'_> {
+            fn attempt(&mut self, _a: u32, _l: Option<&Verdict>) -> anyhow::Result<bool> {
+                self.fixed.set(true);
+                Ok(true)
+            }
+        }
+        let runner = MixedRunner { fixed: &fixed };
+        let mut exec = FixRed { fixed: &fixed };
+        let spec = TaskSpec {
+            targets: ids(&["red", "already_green"]),
+            keep_green: vec![],
+        };
+        assert_eq!(
+            run_task(&spec, &runner, &mut exec, 3, &mut Timings::new()).unwrap(),
+            Outcome::Solved
         );
     }
 }

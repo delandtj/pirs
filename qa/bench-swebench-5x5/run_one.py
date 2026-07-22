@@ -10,6 +10,7 @@ any) back out -> tear down the container.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -84,6 +85,41 @@ def run_instance(instance_id: str, model: str, max_turns: int, timeout_s: int, o
 
         targets = as_list(inst["FAIL_TO_PASS"])
         keep_green = as_list(inst["PASS_TO_PASS"])
+
+        # SWE-bench PASS_TO_PASS / FAIL_TO_PASS often include unittest *docstrings*
+        # (e.g. "Tests the AddField operation.") which are not runnable ids and
+        # bloat agent-discovery (django-14608: 211/394 keep-green were docstrings,
+        # baseline alone 432s). Keep only ids that look like real test selectors.
+        def looks_like_test_id(s: str) -> bool:
+            s = s.strip()
+            if not s or len(s) > 200:
+                return False
+            if "::" in s:  # pytest node id
+                return True
+            if s.startswith("test_") or ".test_" in s:
+                return True
+            # django/unittest label: "test_foo (module.Class)"
+            if s.startswith("test_") or (s.startswith("test") and " (" in s):
+                return True
+            if re.match(r"^test\w* \(.*\)$", s):
+                return True
+            # bare sympy-style: test_mod
+            if re.match(r"^test_[\w\[\],\-\.]+$", s):
+                return True
+            return False
+
+        n_tg, n_kg = len(targets), len(keep_green)
+        targets = [t for t in targets if looks_like_test_id(t)]
+        keep_green = [t for t in keep_green if looks_like_test_id(t)]
+        if len(targets) < n_tg or len(keep_green) < n_kg:
+            logline(
+                f"filtered non-test ids: targets {n_tg}->{len(targets)} "
+                f"keep_green {n_kg}->{len(keep_green)}"
+            )
+        if not targets:
+            # fall back to original if filter was too aggressive
+            targets = as_list(inst["FAIL_TO_PASS"])
+            logline("WARNING: test-id filter removed all targets; using original FAIL_TO_PASS")
 
         if strategy_script:
             sh(["docker", "cp", strategy_script, f"{cname}:/tmp/strategy.rhai"], stdout=log, stderr=log)
