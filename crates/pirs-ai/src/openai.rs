@@ -623,6 +623,79 @@ fn normalize_schema_defs(schema: &mut Value) {
         }
     }
     rewrite_definition_refs(schema);
+    simplify_const_unions(schema);
+}
+
+/// Collapse schemars' enum-with-doc representation into a flat `enum`.
+///
+/// A Rust enum whose variants carry doc comments is emitted by schemars 0.8 as
+/// a `oneOf` of single-value const subschemas:
+/// `{ "oneOf": [{ "enum": ["connect"], "type": "string", "description": ... }, ...] }`.
+/// Moonshot/Kimi's validator can't digest that construct and misreports it as
+/// "infinite recursion without termination condition". Every such union is
+/// equivalent to `{ "type": "string", "enum": ["connect", ...] }`, which strict
+/// validators accept. This walks the tree and rewrites any `oneOf`/`anyOf`
+/// whose members are all simple const/enum subschemas of one primitive type.
+/// The per-variant doc strings are dropped (the literal values are
+/// self-describing); nothing else about the schema changes.
+fn simplify_const_unions(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            let collapsed = ["oneOf", "anyOf"].iter().find_map(|k| match map.get(*k) {
+                Some(Value::Array(variants)) => collapse_const_variants(variants),
+                _ => None,
+            });
+            if let Some((ty, values)) = collapsed {
+                map.remove("oneOf");
+                map.remove("anyOf");
+                if let Some(t) = ty {
+                    map.insert("type".into(), Value::String(t));
+                }
+                map.insert("enum".into(), Value::Array(values));
+            }
+            for (_k, child) in map.iter_mut() {
+                simplify_const_unions(child);
+            }
+        }
+        Value::Array(arr) => arr.iter_mut().for_each(simplify_const_unions),
+        _ => {}
+    }
+}
+
+/// If every variant is a plain const/enum subschema of a single consistent
+/// primitive type, return `(that type, all values)`. Otherwise `None` (leave
+/// the union untouched -- it encodes real structural alternatives).
+fn collapse_const_variants(variants: &[Value]) -> Option<(Option<String>, Vec<Value>)> {
+    if variants.is_empty() {
+        return None;
+    }
+    let mut values = Vec::new();
+    let mut ty: Option<String> = None;
+    for var in variants {
+        let obj = var.as_object()?;
+        // Any structural keyword means this is a real alternative, not a const.
+        if obj
+            .keys()
+            .any(|k| !matches!(k.as_str(), "enum" | "const" | "type" | "description" | "title" | "default"))
+        {
+            return None;
+        }
+        if let Some(c) = obj.get("const") {
+            values.push(c.clone());
+        } else if let Some(Value::Array(en)) = obj.get("enum") {
+            values.extend(en.iter().cloned());
+        } else {
+            return None;
+        }
+        if let Some(Value::String(t)) = obj.get("type") {
+            match &ty {
+                None => ty = Some(t.clone()),
+                Some(existing) if existing == t => {}
+                Some(_) => return None, // mixed primitive types -> keep the union
+            }
+        }
+    }
+    Some((ty, values))
 }
 
 fn rewrite_definition_refs(v: &mut Value) {
@@ -810,6 +883,48 @@ mod tests {
             "#/$defs/EditOp",
             "ref rewritten to #/$defs/"
         );
+    }
+
+    #[test]
+    fn normalize_collapses_schemars_enum_oneof() {
+        // The exact shape schemars 0.8 emits for a doc-commented unit enum
+        // (the browser_cdp `action` field) that Kimi called "infinite recursion".
+        let mut schema = json!({
+            "type": "object",
+            "properties": { "action": { "$ref": "#/definitions/CdpAction" } },
+            "definitions": {
+                "CdpAction": {
+                    "oneOf": [
+                        { "description": "connect", "enum": ["connect"], "type": "string" },
+                        { "description": "goto",    "enum": ["goto"],    "type": "string" },
+                        { "description": "close",   "enum": ["close"],   "type": "string" }
+                    ]
+                }
+            }
+        });
+        normalize_schema_defs(&mut schema);
+        let action_def = &schema["$defs"]["CdpAction"];
+        assert!(action_def.get("oneOf").is_none(), "oneOf collapsed away");
+        assert_eq!(action_def["type"], "string");
+        assert_eq!(
+            action_def["enum"],
+            json!(["connect", "goto", "close"]),
+            "all variant values flattened into one enum"
+        );
+    }
+
+    #[test]
+    fn normalize_leaves_real_unions_alone() {
+        // A oneOf with genuine structural alternatives must NOT be collapsed.
+        let mut schema = json!({
+            "oneOf": [
+                { "type": "object", "properties": { "a": { "type": "string" } } },
+                { "type": "string", "enum": ["x"] }
+            ]
+        });
+        let before = schema.clone();
+        normalize_schema_defs(&mut schema);
+        assert_eq!(schema, before, "structural union preserved");
     }
 
     #[test]
