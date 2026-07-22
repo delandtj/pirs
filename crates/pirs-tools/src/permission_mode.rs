@@ -114,6 +114,22 @@ pub fn permission_deny_reason_with_args(
     tool: &str,
     args: &serde_json::Value,
 ) -> Option<String> {
+    // project list/packages only inspect — allow under read-only.
+    // Other project actions spawn processes and need danger-full-access.
+    if tool == "project" {
+        if crate::safety_profile::project_action_is_readonly(args) {
+            return None;
+        }
+        if mode < PermissionMode::DangerFullAccess {
+            return Some(format!(
+                "tool `project` action requires permission mode `{}` (current: `{}`); \
+                 raise with --permission-mode / PIRS_PERMISSION_MODE or use plan→act",
+                PermissionMode::DangerFullAccess.name(),
+                mode.name()
+            ));
+        }
+        return None;
+    }
     // Mutating actions on otherwise-readonly tools need workspace-write+.
     if let Some(reason) = crate::safety_profile::mutating_action_deny(tool, args) {
         if mode < PermissionMode::WorkspaceWrite {

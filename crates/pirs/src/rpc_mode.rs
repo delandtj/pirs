@@ -134,29 +134,14 @@ pub async fn run(opts: RpcOptions) -> anyhow::Result<()> {
         ext_for_install,
     );
 
-    // Sub-agents get the same before/after policy chain as the parent.
-    // Re-read is not possible after install; build a profile+perm gate for them.
-    {
-        let gate = crate::approval::ApprovalGate::with_profile(
-            safety_cfg.approval,
-            cwd.clone(),
-            safety_cfg.profile,
-        );
-        let mut gh = if safety_cfg.approval == crate::approval::ApprovalMode::Ask
-            || safety_cfg.profile != pirs_tools::SafetyProfile::Default
-        {
-            Some(gate.hook())
-        } else {
-            None
-        };
-        gh = pirs_agent::Hooks::chain_before(gh, Some(pirs_tools::live_permission_hook()));
-        if let (Some(b), Some(a)) = (&ext_hooks.before_tool_call, &ext_hooks.after_tool_call) {
-            if let Some(chained) = pirs_agent::Hooks::chain_before(gh, Some(b.clone())) {
-                *policy_slot.lock().unwrap() = Some((chained, a.clone()));
-            }
-        }
-        std::mem::forget(gate);
-    }
+    // Sub-agents always get profile/permission gate (even with --no-extensions /
+    // no pack hooks) — mirrors interactive main.rs policy_slot fallback.
+    crate::runtime_safety::fill_subagent_policy_slot(
+        &policy_slot,
+        &safety_cfg,
+        ext_hooks.before_tool_call.clone(),
+        ext_hooks.after_tool_call.clone(),
+    );
 
     let session_path = session::session_path(cwd)?;
     let session_id = session_path

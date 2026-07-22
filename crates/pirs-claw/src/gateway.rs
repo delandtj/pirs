@@ -1824,8 +1824,16 @@ mod tests {
         std::env::remove_var("WHATSAPP_VERIFY_TOKEN");
     }
 
+    fn webhook_secret_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn webhook_no_secret_allows() {
+        let _g = webhook_secret_env_lock();
         std::env::remove_var("PIRS_WEBHOOK_SECRET");
         std::env::remove_var("WEBHOOK_SECRET");
         std::env::remove_var("PIRS_SLACK_WEBHOOK_SECRET");
@@ -1834,6 +1842,7 @@ mod tests {
 
     #[test]
     fn webhook_secret_requires_signature_header() {
+        let _g = webhook_secret_env_lock();
         std::env::set_var("PIRS_WEBHOOK_SECRET", "s3cret");
         let err = verify_webhook_signature("slack", "POST /\r\nHost: x\r\n", "{}").unwrap_err();
         assert!(err.contains("no X-Pirs") || err.contains("Signature"), "{err}");
@@ -1842,6 +1851,7 @@ mod tests {
 
     #[test]
     fn webhook_valid_hmac_passes() {
+        let _g = webhook_secret_env_lock();
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
         let secret = b"s3cret";

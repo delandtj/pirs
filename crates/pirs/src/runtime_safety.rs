@@ -6,8 +6,9 @@
 //! module is the single place those modes call so they cannot diverge.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use pirs_agent::events::{AfterToolCallHook, BeforeToolCallHook};
 use pirs_agent::{Agent, Hooks};
 use pirs_tools::{PermissionMode, SafetyProfile};
 
@@ -34,8 +35,7 @@ impl SafetyConfig {
         provider: &str,
     ) -> Self {
         let approval = ApprovalMode::parse(approval).unwrap_or(ApprovalMode::Auto);
-        let profile =
-            SafetyProfile::parse(agent_profile).unwrap_or(SafetyProfile::Default);
+        let profile = SafetyProfile::parse(agent_profile).unwrap_or(SafetyProfile::Default);
         let permission = permission_mode
             .and_then(PermissionMode::parse)
             .unwrap_or_else(PermissionMode::from_env);
@@ -49,6 +49,7 @@ impl SafetyConfig {
     }
 
     /// Env-only fallback for tests / direct library use of rpc without main.
+    #[allow(dead_code)]
     pub fn from_env(cwd: PathBuf) -> Self {
         let approval = std::env::var("PIRS_APPROVAL")
             .ok()
@@ -78,22 +79,25 @@ pub fn provider_is_anthropic(provider: &str) -> bool {
     provider.eq_ignore_ascii_case("anthropic")
 }
 
-/// Install profile denials, optional Ask approval, live permission ladder, and
-/// audit log. Chains `extra_before` after the safety gate (e.g. ACP client
-/// permission prompts, extension pack hooks).
+/// Build the composed `before_tool_call` gate used by headless modes.
 ///
-/// Returns the agent with hooks + audit subscriber applied.
-pub fn install_safety_floor(
-    mut agent: Agent,
+/// Order: approval/profile gate → live permission ladder → `extra_before`
+/// (ACP client permission, pack hooks, …).
+///
+/// Returns the hook plus the `ApprovalGate` Arc that must stay alive for the
+/// session (Ask mode remembers "always" on that gate).
+pub fn compose_safety_before_hook(
     cfg: &SafetyConfig,
-    mut extra_before: Option<pirs_agent::events::BeforeToolCallHook>,
-    mut extra_hooks: Hooks,
-) -> Agent {
+    extra_before: Option<BeforeToolCallHook>,
+) -> (BeforeToolCallHook, Arc<ApprovalGate>) {
     pirs_tools::init_live_permission_mode(cfg.permission);
-    // So Rhai packs see the same profile name as the gate.
     std::env::set_var("PIRS_AGENT_PROFILE", cfg.profile.name());
 
-    let gate = ApprovalGate::with_profile(cfg.approval, cfg.cwd.clone(), cfg.profile);
+    let gate = Arc::new(ApprovalGate::with_profile(
+        cfg.approval,
+        cfg.cwd.clone(),
+        cfg.profile,
+    ));
     let mut gate_hook = if cfg.approval == ApprovalMode::Ask
         || cfg.profile != SafetyProfile::Default
     {
@@ -103,12 +107,26 @@ pub fn install_safety_floor(
     };
     // Always install live permission ladder (plan/act mid-session).
     gate_hook = Hooks::chain_before(gate_hook, Some(pirs_tools::live_permission_hook()));
-    // Mode-specific before hooks (ACP permission, etc.).
-    gate_hook = Hooks::chain_before(gate_hook, extra_before.take());
-    // Extension pack before hooks last (first blocker already applied above).
-    gate_hook = Hooks::chain_before(gate_hook, extra_hooks.before_tool_call.take());
+    gate_hook = Hooks::chain_before(gate_hook, extra_before);
+    let hook = gate_hook.expect("live permission ladder always yields a before_tool hook");
+    (hook, gate)
+}
 
-    extra_hooks.before_tool_call = gate_hook;
+/// Install profile denials, optional Ask approval, live permission ladder, and
+/// audit log. Chains `extra_before` after the safety gate (e.g. ACP client
+/// permission prompts, extension pack hooks).
+///
+/// Returns the agent with hooks + audit subscriber applied.
+pub fn install_safety_floor(
+    mut agent: Agent,
+    cfg: &SafetyConfig,
+    extra_before: Option<BeforeToolCallHook>,
+    mut extra_hooks: Hooks,
+) -> Agent {
+    let pack_before = extra_hooks.before_tool_call.take();
+    let chained_extra = Hooks::chain_before(extra_before, pack_before);
+    let (hook, gate) = compose_safety_before_hook(cfg, chained_extra);
+    extra_hooks.before_tool_call = Some(hook);
     agent = agent.with_hooks(extra_hooks);
 
     // First-class audit (disable with PIRS_AUDIT=0).
@@ -118,6 +136,23 @@ pub fn install_safety_floor(
     // Keep gate alive for the session (Ask mode remembers "always").
     std::mem::forget(gate);
     agent
+}
+
+/// Fill the sub-agent policy slot so sub-agents inherit the same safety floor
+/// as the parent — even when no extension packs provide before/after hooks
+/// (mirrors interactive `main.rs` fallback when `policy_slot` is empty).
+pub fn fill_subagent_policy_slot(
+    slot: &Mutex<Option<(BeforeToolCallHook, AfterToolCallHook)>>,
+    cfg: &SafetyConfig,
+    ext_before: Option<BeforeToolCallHook>,
+    ext_after: Option<AfterToolCallHook>,
+) {
+    let (hook, gate) = compose_safety_before_hook(cfg, ext_before);
+    let after: AfterToolCallHook = ext_after.unwrap_or_else(|| {
+        Arc::new(|_id, _name, _result| None)
+    });
+    *slot.lock().unwrap() = Some((hook, after));
+    std::mem::forget(gate);
 }
 
 /// Pure: which tools are blocked under plan for process spawning.
@@ -139,7 +174,6 @@ mod tests {
 
     #[test]
     fn from_resolved_prefers_cli_strings_not_env() {
-        // Even if env says anthropic, resolved openai wins.
         std::env::set_var("PIRS_PROVIDER", "anthropic");
         let cfg = SafetyConfig::from_resolved(
             PathBuf::from("/work"),
@@ -170,53 +204,8 @@ mod tests {
     }
 
     #[test]
-    fn install_safety_floor_denies_bash_under_plan() {
-        use async_trait::async_trait;
-        use pirs_agent::{AgentTool, ToolExecContext, ToolOutput};
-        use pirs_ai::{
-            AssistantMessage, CompletionOptions, ContentBlock, Context, LlmProvider, StopReason,
-            StreamEvent,
-        };
-        use std::sync::Mutex;
-
-        struct Mock;
-        #[async_trait]
-        impl LlmProvider for Mock {
-            async fn stream(
-                &self,
-                _model: &str,
-                _context: &Context,
-                _options: &CompletionOptions,
-                _cancel: tokio_util::sync::CancellationToken,
-            ) -> futures::stream::BoxStream<'static, StreamEvent> {
-                Box::pin(futures::stream::iter(vec![StreamEvent::Done(Box::new(
-                    AssistantMessage {
-                        content: vec![ContentBlock::text("ok")],
-                        stop_reason: StopReason::Stop,
-                        ..Default::default()
-                    },
-                ))]))
-            }
-        }
-
-        struct NoopTool;
-        #[async_trait]
-        impl AgentTool for NoopTool {
-            fn name(&self) -> &str {
-                "bash"
-            }
-            fn description(&self) -> &str {
-                "x"
-            }
-            fn parameters(&self) -> serde_json::Value {
-                json!({"type":"object","properties":{}})
-            }
-            async fn execute(&self, _ctx: ToolExecContext) -> anyhow::Result<ToolOutput> {
-                Ok(ToolOutput::text("ran"))
-            }
-        }
-
-        let agent = Agent::new(Arc::new(Mock), "mock").with_tools(vec![Arc::new(NoopTool)]);
+    fn compose_safety_before_hook_denies_bash_under_plan() {
+        // Drives the *real* installed before_tool hook, not a re-implementation.
         let cfg = SafetyConfig {
             approval: ApprovalMode::Auto,
             profile: SafetyProfile::Plan,
@@ -224,17 +213,77 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             provider: "openai".into(),
         };
-        let agent = install_safety_floor(agent, &cfg, None, Hooks::default());
-        // Drive before_tool via the public hook path: observe_tool_start is thrash;
-        // we call the installed hook through Hooks by running a micro prompt that
-        // would call bash — instead invoke the hook Arc if we can extract it.
-        // Structural: agent has hooks; call plan_blocks which install uses.
-        assert!(plan_blocks_process_tool(
-            "bash",
-            &json!({"command": "echo hi"})
-        ));
-        // Keep agent so it is not optimized out.
-        let _ = agent.model;
-        let _ = Mutex::new(());
+        let (hook, _gate) = compose_safety_before_hook(&cfg, None);
+        let deny = hook("call-1", "bash", &json!({"command": "echo hi"}));
+        assert!(
+            deny.is_some(),
+            "plan profile hook must deny bash; got None (install would be a no-op)"
+        );
+        assert!(
+            deny.as_deref().unwrap().contains("plan")
+                || deny.as_deref().unwrap().contains("bash")
+                || deny.as_deref().unwrap().contains("read-only"),
+            "unexpected deny text: {deny:?}"
+        );
+        // list-only project must still be allowed under plan.
+        let allow = hook("call-2", "project", &json!({"action": "list"}));
+        assert!(
+            allow.is_none(),
+            "project list must not be denied under plan: {allow:?}"
+        );
+        let deny_test = hook("call-3", "project", &json!({"action": "test"}));
+        assert!(
+            deny_test.is_some(),
+            "project test must be denied under plan"
+        );
+    }
+
+    #[test]
+    fn fill_subagent_policy_slot_always_populated_without_packs() {
+        let cfg = SafetyConfig {
+            approval: ApprovalMode::Auto,
+            profile: SafetyProfile::Plan,
+            permission: PermissionMode::ReadOnly,
+            cwd: PathBuf::from("/tmp"),
+            provider: "openai".into(),
+        };
+        let slot: Mutex<Option<(BeforeToolCallHook, AfterToolCallHook)>> =
+            Mutex::new(None);
+        fill_subagent_policy_slot(&slot, &cfg, None, None);
+        let guard = slot.lock().unwrap();
+        let (before, _after) = guard.as_ref().expect("slot must be filled without packs");
+        let deny = before("id", "bash", &json!({"command": "true"}));
+        assert!(
+            deny.is_some(),
+            "sub-agent policy without packs must still deny bash under plan"
+        );
+    }
+
+    /// Regression: production rpc_mode/acp_mode must call shared assembly.
+    /// Asserts on the production source slice only (before any `#[cfg(test)]`).
+    #[test]
+    fn rpc_and_acp_source_invoke_shared_safety_floor() {
+        let rpc = include_str!("rpc_mode.rs");
+        let acp = include_str!("acp_mode.rs");
+        let rpc_prod = rpc.split("#[cfg(test)]").next().unwrap_or(rpc);
+        let acp_prod = acp.split("#[cfg(test)]").next().unwrap_or(acp);
+        for (name, prod) in [("rpc_mode", rpc_prod), ("acp_mode", acp_prod)] {
+            assert!(
+                prod.contains("install_safety_floor"),
+                "{name} production code must call install_safety_floor"
+            );
+            assert!(
+                prod.contains("SafetyConfig::from_resolved"),
+                "{name} production code must use SafetyConfig::from_resolved"
+            );
+            assert!(
+                prod.contains("fill_subagent_policy_slot"),
+                "{name} production code must fill subagent policy without requiring packs"
+            );
+            assert!(
+                prod.contains("provider_is_anthropic"),
+                "{name} production code must select provider from resolved CLI, not env alone"
+            );
+        }
     }
 }
