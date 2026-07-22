@@ -153,6 +153,80 @@ pub fn enforce_tool_result_adjacency(messages: &mut Vec<Message>) {
     }
 }
 
+/// Backfill synthetic results for any assistant tool_call left without a
+/// matching tool_result in its response group.
+///
+/// `enforce_tool_result_adjacency` repairs *order* -- a result that exists but
+/// got displaced by a pin. It cannot conjure a result that is simply *absent*:
+/// a `transform_context` pack (conductor / weak-model) that drops a tool_result
+/// while rewriting history, or a turn interrupted before the result was ever
+/// recorded. When such a dangling call reaches the wire, OpenAI-format gateways
+/// (e.g. Kimi's coding endpoint) reject the whole request -- "an assistant
+/// message with 'tool_calls' must be followed by tool messages ... did not have
+/// response messages". This inserts a stub error result for every unanswered
+/// call, adjacent to the issuing assistant, so the wire invariant holds no
+/// matter how the outgoing history was mangled. It is a serialization-time
+/// safety net only: it never touches persisted history.
+pub fn backfill_missing_tool_results(messages: &mut Vec<Message>) {
+    let mut i = 0;
+    while i < messages.len() {
+        let calls: Vec<(String, String)> = match &messages[i] {
+            Message::Assistant(a) => a
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolCall { id, name, .. } => Some((id.clone(), name.clone())),
+                    _ => None,
+                })
+                .collect(),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        if calls.is_empty() {
+            i += 1;
+            continue;
+        }
+        // Response group: everything up to the next assistant message.
+        let start = i + 1;
+        let mut end = start;
+        while end < messages.len() && !matches!(messages[end], Message::Assistant(_)) {
+            end += 1;
+        }
+        let present: std::collections::HashSet<String> = messages[start..end]
+            .iter()
+            .filter_map(|m| match m {
+                Message::ToolResult(tr) => Some(tr.tool_call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut inserted = 0;
+        for (id, name) in calls {
+            if present.contains(&id) {
+                continue;
+            }
+            let stub = Message::ToolResult(pirs_ai::ToolResultMessage {
+                tool_call_id: id,
+                tool_name: name,
+                content: vec![ContentBlock::text(
+                    "Tool result missing from history (the turn was interrupted or the result \
+                     was dropped by a context transform); synthesized so the request stays valid.",
+                )],
+                details: Some(serde_json::json!({ "errorKind": "missing_result" })),
+                is_error: true,
+                terminate: false,
+                timestamp: pirs_ai::now_millis(),
+            });
+            // Insert adjacent to the tool_use; ordering among a group's results
+            // is irrelevant to the protocol.
+            messages.insert(start, stub);
+            inserted += 1;
+        }
+        i = end + inserted;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +332,67 @@ mod tests {
         assert!(is_tool_result(&msgs[1]));
         assert!(matches!(msgs[2], Message::Assistant(_)));
         assert!(is_reminder_kind(&msgs[3], "plan"), "pin stays in its own turn");
+    }
+
+    #[test]
+    fn backfill_synthesizes_missing_result() {
+        // A dangling tool_use whose result was dropped gets a stub, adjacent.
+        let mut msgs = vec![
+            user("go"),
+            assistant_tool_use("t1"),
+            // no tool_result for t1 -- e.g. dropped by a transform pack
+        ];
+        backfill_missing_tool_results(&mut msgs);
+        assert_eq!(msgs.len(), 3, "one stub result added");
+        match &msgs[2] {
+            Message::ToolResult(tr) => {
+                assert_eq!(tr.tool_call_id, "t1");
+                assert!(tr.is_error, "stub is an error result");
+            }
+            _ => panic!("expected a synthesized tool_result at index 2"),
+        }
+    }
+
+    #[test]
+    fn backfill_is_noop_when_all_results_present() {
+        let mut msgs = vec![assistant_tool_use("t1"), tool_result("t1")];
+        backfill_missing_tool_results(&mut msgs);
+        assert_eq!(msgs.len(), 2, "nothing added when the call is answered");
+    }
+
+    #[test]
+    fn backfill_only_fills_the_absent_call_in_a_group() {
+        // Assistant with two calls; only one result present -- fill the other.
+        let mut msgs = vec![
+            Message::Assistant(pirs_ai::AssistantMessage {
+                content: vec![
+                    ContentBlock::ToolCall {
+                        id: "a".into(),
+                        name: "git".into(),
+                        arguments: serde_json::json!({}),
+                        thought_signature: None,
+                    },
+                    ContentBlock::ToolCall {
+                        id: "b".into(),
+                        name: "git".into(),
+                        arguments: serde_json::json!({}),
+                        thought_signature: None,
+                    },
+                ],
+                ..Default::default()
+            }),
+            tool_result("a"),
+        ];
+        backfill_missing_tool_results(&mut msgs);
+        let result_ids: std::collections::HashSet<String> = msgs
+            .iter()
+            .filter_map(|m| match m {
+                Message::ToolResult(tr) => Some(tr.tool_call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(result_ids.contains("a") && result_ids.contains("b"));
+        assert_eq!(msgs.len(), 3, "exactly one stub added for the missing call");
     }
 
     #[test]

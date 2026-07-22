@@ -422,6 +422,11 @@ async fn stream_once(
     // between a trailing assistant tool_use and its tool_result; repair adjacency
     // before serialization or the backend rejects the request (dangling tool_call).
     crate::control_pins::enforce_tool_result_adjacency(&mut messages);
+    // Adjacency repair only reorders results that exist. A transform pack can
+    // drop a tool_result outright, or a prior turn can leave a call unanswered;
+    // synthesize a stub for any still-dangling call so the backend never sees an
+    // assistant tool_call without a following result.
+    crate::control_pins::backfill_missing_tool_results(&mut messages);
     let llm_ctx = Context {
         system_prompt: context.system_prompt.clone(),
         messages,
